@@ -14,7 +14,7 @@ flowchart TD
     R --> A[C++ Livox 适配器]
     A --> L[Faster-LIO]
     L --> B[LIO 桥接与机体位姿换算]
-    B --> EV[/mavros/odometry/out 外部位姿]
+    B --> EV["/mavros/odometry/out 外部位姿"]
     EV --> F[PX4 EKF]
     G --> I[飞控 IMU]
     I --> F

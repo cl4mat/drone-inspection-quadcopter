@@ -20,7 +20,8 @@ ROS Noetic / PX4 SITL / Gazebo Classic 工作区，实现基于 MID360 点云的
 推荐环境为 Ubuntu 20.04、ROS Noetic、Gazebo Classic 11 和 PX4 SITL。依赖需包含 catkin、MAVROS、Qt/RViz、PCL、Eigen、OpenCV、Livox ROS 驱动及 Gazebo 插件。
 
 ```bash
-cd /path/to/project0
+git clone --recursive https://github.com/cl4mat/drone-inspection-quadcopter.git project0
+cd project0
 source /opt/ros/noetic/setup.bash
 catkin_make -j1 -l1
 source devel/setup.bash
