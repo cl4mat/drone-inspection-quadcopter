@@ -1,0 +1,78 @@
+{
+  "code": "F7_INFRASTRUCTURE",
+  "events": [
+    {
+      "event": "initial_pose_origin_confirmed",
+      "sim": null,
+      "wall": 1791696845.733
+    },
+    {
+      "event": "ready",
+      "sim": 40.03,
+      "wall": 1791697016.488
+    },
+    {
+      "event": "goal_issued",
+      "goal_odom": [
+        5.235,
+        -1.445,
+        0.97
+      ],
+      "goal_world": [
+        5.499,
+        -1.443,
+        1.261
+      ],
+      "sim": 51.534,
+      "start_world": [
+        -0.002,
+        0.053,
+        1.261
+      ],
+      "wall": 1791697065.143
+    },
+    {
+      "centre": [
+        2.412,
+        -0.601,
+        0.9
+      ],
+      "event": "spawn",
+      "late": false,
+      "sim": 54.734,
+      "trigger_distance": 2.233,
+      "wall": 1791697078.853
+    },
+    {
+      "event": "spawn_confirmed",
+      "sim": 54.736,
+      "wall": 1791697078.855
+    },
+    {
+      "count": 720,
+      "event": "perceived",
+      "sim": 54.934,
+      "voxel": [
+        2.25,
+        -0.45,
+        1.45
+      ],
+      "wall": 1791697079.559
+    },
+    {
+      "event": "landed",
+      "sim": 226.882,
+      "wall": 1791697821.811
+    },
+    {
+      "error": "type object got multiple values for keyword argument 'sim'",
+      "event": "failed",
+      "sim": 226.884,
+      "wall": 1791697821.814
+    }
+  ],
+  "mode": "experiment",
+  "ok": false,
+  "reason": "type object got multiple values for keyword argument 'sim'",
+  "wall_seconds": 1025.7
+}

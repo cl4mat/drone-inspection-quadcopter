@@ -1,0 +1,19 @@
+{
+  "groups": 10,
+  "prebuilt_map": "$PROJECT_ROOT/start/maps/inspection_building.dmap",
+  "startup_min_time": 20.0,
+  "obstacle_inflation": 0.5,
+  "output": "reports/dynamic_obstacle_margin05_20261011",
+  "feasibility": false,
+  "forward": 4.2,
+  "height": 1.2,
+  "obstacle_ahead": 2.2,
+  "obstacle_size": [
+    0.3,
+    2.0,
+    1.8
+  ],
+  "goal_retries": 8,
+  "max_map_age": 4.0,
+  "resume": true
+}

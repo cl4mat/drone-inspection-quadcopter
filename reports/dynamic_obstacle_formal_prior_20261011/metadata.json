@@ -1,0 +1,30 @@
+{
+  "started": "2026-10-11T13:33:12",
+  "feasibility": false,
+  "groups": 3,
+  "forward": 5.5,
+  "height": 1.2,
+  "obstacle_ahead": 2.2,
+  "obstacle_size": [
+    0.3,
+    2.0,
+    1.8
+  ],
+  "laterals": [
+    -1.5,
+    0.0,
+    1.5
+  ],
+  "goal_retries": 8,
+  "max_map_age_s": 4.0,
+  "startup_min_time_s": 20.0,
+  "prebuilt_map": "$PROJECT_ROOT/start/maps/inspection_building.dmap",
+  "launch": "start_simulation.sh --no-gui, measured prebuilt map",
+  "slow_simulator_note": "The simulated clock runs at roughly 0.25x real time on this machine. What ages a grid map is wall-clock pipeline delay, but flight_manager compares that age against max_map_age_s in simulation seconds, so the same Faster-LIO/voxel-carving lag has to be compared in the same clock domain. The 2.0 s shipped default is crossed during ordinary flight and navigation is cancelled before the obstacle exists. DRONE_MAX_MAP_AGE_S is therefore raised to 4 simulation seconds for this experiment (the shipped default is unchanged), the driver records the age on every sample and the per-delta peak in group.json, and any navigation the deadline does cancel is re-issued by the driver as a bounded, recorded goal_resend event.",
+  "criteria": {
+    "trigger": "box voxel in /grid_map/voxel_delta + motion response",
+    "collision": "truth conservative 0.40 m whole-airframe envelope clearance > 0",
+    "arrival": "terminal COMPLETED and truth endpoint error <= 0.30 m",
+    "route_return": "lateral deviation <= 0.35 m after passing the box"
+  }
+}

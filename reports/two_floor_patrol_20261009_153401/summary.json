@@ -1,0 +1,192 @@
+{
+  "mission_completed": true,
+  "map_digest": "51d13dfd3f6730e4a070c7c689188f144070d6d8bf231b489b28d1870cdca1f0",
+  "duration_sim_s": 1603.6139999999996,
+  "duration_wall_s": 7176.467425584793,
+  "planned_path_length_m": 381.73940312972815,
+  "actual_flight_length_m": 441.0320317116184,
+  "actual_inspection_length_m": 436.892038319106,
+  "samples": 7799,
+  "synchronized_lio_samples": 7435,
+  "valid_camera_evaluation_frames": 7366,
+  "lio_translation_error_m": {
+    "n": 7435,
+    "mean": 0.0828274610935973,
+    "median": 0.0698693043315111,
+    "p95": 0.256190627023669,
+    "max": 0.3948423157053066,
+    "rmse": 0.11903986065356986
+  },
+  "lio_attitude_error_deg": {
+    "n": 7435,
+    "mean": 0.3219705843835501,
+    "median": 0.3944000007455301,
+    "p95": 0.6958833008443067,
+    "max": 1.8296820795601687,
+    "rmse": 0.3931397764324306
+  },
+  "arrival_error_m": {
+    "n": 80,
+    "mean": 0.1625807543347429,
+    "median": 0.13253523604058998,
+    "p95": 0.3800012572170465,
+    "max": 0.41340878194509667,
+    "rmse": 0.19157140722640376
+  },
+  "navigation_duration_sim_s": {
+    "n": 80,
+    "mean": 19.83465,
+    "median": 15.750000000000455,
+    "p95": 39.5784999999999,
+    "max": 178.8819999999996,
+    "rmse": 29.52908222921936
+  },
+  "completed_targets": 80,
+  "total_segments": 80,
+  "effective_camera_floor_coverage_pct": 98.56728456204895,
+  "unique_floor_area_m2": 565.36,
+  "unique_camera_covered_m2": 557.26,
+  "regions": [
+    {
+      "region": "lower_hall_floor",
+      "floor": 0,
+      "kind": "hall",
+      "floor_area_m2": 192.0,
+      "safety_area_m2": 130.56,
+      "camera_covered_m2": 191.26,
+      "camera_coverage_pct": 99.61458333333333,
+      "safety_camera_coverage_pct": 100.0,
+      "nominal_swath_coverage_pct": 91.54166666666667
+    },
+    {
+      "region": "lower_left_corridor_floor",
+      "floor": 0,
+      "kind": "corridor",
+      "floor_area_m2": 35.44,
+      "safety_area_m2": 35.44,
+      "camera_covered_m2": 33.35,
+      "camera_coverage_pct": 94.10270880361173,
+      "safety_camera_coverage_pct": 94.10270880361173,
+      "nominal_swath_coverage_pct": 96.16252821670429
+    },
+    {
+      "region": "lower_right_corridor_floor",
+      "floor": 0,
+      "kind": "corridor",
+      "floor_area_m2": 35.44,
+      "safety_area_m2": 35.44,
+      "camera_covered_m2": 32.15,
+      "camera_coverage_pct": 90.71670428893906,
+      "safety_camera_coverage_pct": 90.71670428893906,
+      "nominal_swath_coverage_pct": 93.31264108352144
+    },
+    {
+      "region": "upper_hall_floor",
+      "floor": 1,
+      "kind": "hall",
+      "floor_area_m2": 192.0,
+      "safety_area_m2": 130.56,
+      "camera_covered_m2": 191.97,
+      "camera_coverage_pct": 99.984375,
+      "safety_camera_coverage_pct": 100.0,
+      "nominal_swath_coverage_pct": 92.64583333333333
+    },
+    {
+      "region": "upper_left_corridor_floor",
+      "floor": 1,
+      "kind": "corridor",
+      "floor_area_m2": 35.44,
+      "safety_area_m2": 35.44,
+      "camera_covered_m2": 33.69,
+      "camera_coverage_pct": 95.06207674943566,
+      "safety_camera_coverage_pct": 95.06207674943566,
+      "nominal_swath_coverage_pct": 92.83295711060948
+    },
+    {
+      "region": "upper_right_corridor_floor",
+      "floor": 1,
+      "kind": "corridor",
+      "floor_area_m2": 35.44,
+      "safety_area_m2": 35.44,
+      "camera_covered_m2": 35.32,
+      "camera_coverage_pct": 99.66139954853273,
+      "safety_camera_coverage_pct": 99.66139954853273,
+      "nominal_swath_coverage_pct": 96.6704288939052
+    },
+    {
+      "region": "left_upper_return_corridor",
+      "floor": 1,
+      "kind": "corridor",
+      "floor_area_m2": 14.040000000000001,
+      "safety_area_m2": 14.040000000000001,
+      "camera_covered_m2": 14.0,
+      "camera_coverage_pct": 99.71509971509971,
+      "safety_camera_coverage_pct": 99.71509971509971,
+      "nominal_swath_coverage_pct": 96.86609686609687
+    },
+    {
+      "region": "right_upper_return_corridor",
+      "floor": 1,
+      "kind": "corridor",
+      "floor_area_m2": 14.040000000000001,
+      "safety_area_m2": 14.040000000000001,
+      "camera_covered_m2": 13.94,
+      "camera_coverage_pct": 99.28774928774929,
+      "safety_camera_coverage_pct": 99.28774928774929,
+      "nominal_swath_coverage_pct": 96.22507122507122
+    },
+    {
+      "region": "left_stair_treads",
+      "floor": 2,
+      "kind": "stair",
+      "floor_area_m2": 9.0,
+      "safety_area_m2": 9.0,
+      "camera_covered_m2": 9.0,
+      "camera_coverage_pct": 100.0,
+      "safety_camera_coverage_pct": 100.0,
+      "nominal_swath_coverage_pct": 100.0
+    },
+    {
+      "region": "right_stair_treads",
+      "floor": 3,
+      "kind": "stair",
+      "floor_area_m2": 9.0,
+      "safety_area_m2": 9.0,
+      "camera_covered_m2": 9.0,
+      "camera_coverage_pct": 100.0,
+      "safety_camera_coverage_pct": 100.0,
+      "nominal_swath_coverage_pct": 100.0
+    }
+  ],
+  "definitions": {
+    "lio_drift": "Ground-truth relative pose error after one fixed initial SE(3) alignment; includes no target error.",
+    "arrival_error": "Ground-truth body centre minus segment endpoint in map-origin world coordinates.",
+    "navigation_time": "Segment entry to completion, including planning/approach/pauses; simulation and wall clocks separate.",
+    "coverage": "Union of down-camera frustum floor cells with static wall/cabinet/rail occlusion; not detector recognition.",
+    "nominal_swath": "Actual flown centreline buffered by configured strip spacing / 2; independent of camera footprint.",
+    "floor_area": "Actual scene floor area excluding cabinet footprints; horizontal stair treads included. Global coverage deduplicates overlapping floor links; safety hall inset is stored in metadata. Layers 0/1 are floors, 2/3 are stairs."
+  },
+  "terrain_statistics": [
+    {
+      "kind": "corridor",
+      "speed_mean_mps": 0.3430546690853642,
+      "speed_p95_mps": 0.6799182649048356,
+      "speed_max_mps": 0.8506852999129635,
+      "height_mean_m": 1.2761899849527938
+    },
+    {
+      "kind": "hall",
+      "speed_mean_mps": 0.2977821602837184,
+      "speed_p95_mps": 0.7110507992637366,
+      "speed_max_mps": 1.0946359313301097,
+      "height_mean_m": 1.6632935802516873
+    },
+    {
+      "kind": "stair",
+      "speed_mean_mps": 0.1315921587156789,
+      "speed_p95_mps": 0.48046436108394786,
+      "speed_max_mps": 0.6690215670666272,
+      "height_mean_m": 1.380318083196601
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "output": "$PROJECT_ROOT/reports/dynamic_obstacle_margin05_20261011/groups/group_08",
+  "map_mode": "PRIOR_NAV",
+  "forward": 4.252319496870041,
+  "lateral": 0.045709638560190724,
+  "height": 1.2,
+  "obstacle_ahead": 2.2,
+  "obstacle_size": [
+    0.3,
+    2.0,
+    1.8
+  ],
+  "goal_retries": 8,
+  "ready_timeout": 1200.0,
+  "inject_timeout": 360.0,
+  "perception_timeout": 90.0,
+  "arrive_timeout": 360.0,
+  "keep_airborne": true,
+  "reuse_airborne": true,
+  "protocol": "continuous shared flight",
+  "ready_settle_wall_s": 1.0,
+  "obstacle_inflation": 0.5,
+  "goal_offset_z": -0.005096604347229028,
+  "fixed_goal_odom": [
+    3.95,
+    0.04299999999999993,
+    0.973
+  ]
+}

@@ -1,18 +1,28 @@
 <launch>
+  <arg name="aggressive_sim" default="$(optenv DRONE_SIM_AGGRESSIVE false)"/>
+  <param name="/drone/sim_aggressive" value="$(arg aggressive_sim)" type="bool"/>
+  <param name="/drone/building/progress_timeout_s" value="$(eval 90.0 if arg('aggressive_sim') == 'true' else 25.0)"/>
   <param name="/use_sim_time" value="true"/>
-  <param name="/drone/health_hold_s" value="1.0"/>
-  <param name="/drone/health_land_s" value="2.0"/>
+  <param name="/drone/health_hold_s" value="$(eval 3.0 if arg('aggressive_sim') == 'true' else 1.0)"/>
+  <param name="/drone/health_land_s" value="$(eval 8.0 if arg('aggressive_sim') == 'true' else 2.0)"/>
   <param name="/drone/native_lidar_frontend" value="true"/>
+  <arg name="profile" default="building"/>
+  <param name="/drone/simulation_profile" value="$(arg profile)"/>
   <arg name="fcu_url" default="udp://:14540@127.0.0.1:14557"/>
   <arg name="gui" default="true"/>
+  <arg name="optional_managers" default="true"/>
   <arg name="heartbeat_diagnostics" default="false"/>
   <arg name="online_mode" default="false"/>
   <arg name="lio_latency_diagnostics" default="false"/>
   <param name="/drone/record_lio_latency" value="$(arg lio_latency_diagnostics)"/>
-  <arg name="prebuilt_map" default="$(find drone_stack)/../../start/maps/inspection_demo_scene.dmap"/>
+  <arg name="prebuilt_map" default="$(find drone_stack)/../../start/maps/inspection_building.dmap"/>
   <param name="/drone/prebuilt_map_path" value="$(arg prebuilt_map)"/>
-  <arg name="max_flight_height" default="2.5"/>
+  <arg name="max_flight_height" default="$(eval 2.5 if arg('profile') == 'legacy' else 6.6)"/>
+  <param name="/drone/configured_max_height_m" value="$(eval 2.5 if arg('profile') == 'legacy' else 6.6)" type="double"/>
   <param name="/drone/max_flight_height_m" value="$(arg max_flight_height)" type="double"/>
+  <arg name="global_search_resolution_m" default="0.30"/>
+  <param name="/drone/global_search_resolution_m" value="$(arg global_search_resolution_m)" type="double"/>
+  <param name="/drone/max_navigation_speed_mps" value="2.0" type="double"/>
   <param name="/drone/terminal_approach_distance_m" value="0.8" type="double"/>
   <param name="/drone/terminal_speed_mps" value="0.2" type="double"/>
   <param name="/drone/terminal_deceleration_mps2" value="0.4" type="double"/>
@@ -34,14 +44,37 @@
        installed MAVROS time filter wrap to huge unsigned offsets. This is
        simulation-only; real hardware must use MAVLINK time synchronisation. -->
   <param name="/mavros/time/timesync_mode" value="PASSTHROUGH"/>
+  <!-- Heartbeats use wall time; GUI simulation may run slower than real time. Pose/EKF safety ages remain unchanged. -->
+  <param name="/mavros/conn/timeout" value="60.0"/>
   <param name="/mavros/conn/timesync_rate" value="0.0"/>
-  <include file="$(find drone_stack)/launch/lio.launch"/>
-  <include file="$(find drone_stack)/launch/ego.launch"/>
+  <include file="$(find drone_stack)/launch/lio.launch"><arg name="aggressive_sim" value="$(arg aggressive_sim)"/><arg name="gazebo_world" value="$(eval 'inspection_demo' if arg('profile') == 'legacy' else 'inspection_building')"/></include>
+  <rosparam param="/drone/map_navigation_min_xyz">[-30.0, -8.0, 0.5]</rosparam>
+  <rosparam param="/drone/map_navigation_max_xyz">[30.0, 22.0, 6.6]</rosparam>
+  <rosparam param="/drone/navigation_min_xyz">[-30.0, -8.0, 0.5]</rosparam>
+  <rosparam param="/drone/navigation_max_xyz">[30.0, 22.0, 6.6]</rosparam>
+  <rosparam param="/drone_flight_manager/goal_min_xyz">[-30.0, -8.0, 0.5]</rosparam>
+  <rosparam param="/drone_flight_manager/goal_max_xyz">[30.0, 22.0, 6.6]</rosparam>
+  <group if="$(eval arg('profile') == 'legacy')">
+    <rosparam param="/drone/map_navigation_min_xyz">[-8.0, -8.0, 0.5]</rosparam>
+    <rosparam param="/drone/map_navigation_max_xyz">[8.0, 8.0, 2.5]</rosparam>
+    <rosparam param="/drone/navigation_min_xyz">[-8.0, -8.0, 0.5]</rosparam>
+    <rosparam param="/drone/navigation_max_xyz">[8.0, 8.0, 2.5]</rosparam>
+    <rosparam param="/drone_flight_manager/goal_min_xyz">[-8.0, -8.0, 0.5]</rosparam>
+    <rosparam param="/drone_flight_manager/goal_max_xyz">[8.0, 8.0, 2.5]</rosparam>
+  </group>
+  <include file="$(find drone_stack)/launch/ego.launch"><arg name="profile" value="$(arg profile)"/><arg name="aggressive_sim" value="$(arg aggressive_sim)"/></include>
   <include file="$(find drone_stack)/launch/cameras.launch"/>
   <!-- A manager exit must leave LIO/MAVROS running so PX4 can use its
        OFFBOARD-loss landing fallback with external position still available. -->
   <node pkg="drone_stack" type="flight_manager.py" name="drone_flight_manager" output="screen">
-    <param name="startup_min_time_s" value="65.0"/>
+    <param name="startup_min_time_s" value="$(optenv DRONE_STARTUP_MIN_TIME_S 65.0)" type="double"/>
+    <!-- Simulation seconds, and the only one of these deadlines that has to be
+         scaled with the simulator: it is compared against sim time, but what
+         makes a map old is wall-clock pipeline delay, so a host running at a
+         quarter of real time sees roughly four times the age for the same
+         Faster-LIO/voxel-carving lag.  DRONE_MAX_MAP_AGE_S raises it for such a
+         host; the 2.0 default is unchanged. -->
+    <param name="max_map_age_s" value="$(optenv DRONE_MAX_MAP_AGE_S 2.0)" type="double"/>
     <param name="max_planner_age_s" value="1.0"/>
     <param name="record_heartbeat_diagnostics" value="$(arg heartbeat_diagnostics)"/>
     <!-- Faster-LIO scans and PX4 external-vision fusion can be about 0.25 s
@@ -57,6 +90,14 @@
   </node>
   <node pkg="drone_stack" type="safe_global_path.py" name="drone_safe_global_path" output="screen">
     <param name="max_search_nodes" value="15000"/>
+  </node>
+  <node if="$(arg optional_managers)" pkg="drone_stack" type="inspection_manager.py" name="drone_inspection_manager" output="screen">
+    <rosparam command="load" file="$(find drone_stack)/config/inspection.yaml"/>
+  </node>
+  <node if="$(arg gui)" pkg="drone_stack" type="map_floor_view.py" name="drone_map_floor_view" output="screen"/>
+  <node pkg="drone_stack" type="building_manager.py" name="drone_building_manager" output="screen"/>
+  <node if="$(arg optional_managers)" pkg="drone_stack" type="drone_ai_node.py" name="drone_ai" output="screen">
+    <rosparam command="load" file="$(find drone_stack)/config/ai.yaml"/>
   </node>
   <node if="$(arg gui)" pkg="drone_stack" type="drone_operator_gui" name="drone_operator_gui" output="screen"/>
 </launch>

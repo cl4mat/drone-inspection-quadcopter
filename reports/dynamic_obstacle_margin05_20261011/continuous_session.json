@@ -1,0 +1,70 @@
+{
+  "events": [
+    {
+      "wall": 1791703290.698,
+      "sim": 350.764,
+      "event": "ready_airborne"
+    },
+    {
+      "wall": 1791703290.713,
+      "sim": 350.78,
+      "event": "goal_issued",
+      "goal_odom": [
+        3.951,
+        -1.456,
+        0.973
+      ],
+      "start_world": [
+        -0.074,
+        -0.03,
+        1.287
+      ],
+      "goal_world": [
+        4.22,
+        -1.451,
+        1.276
+      ]
+    },
+    {
+      "wall": 1791703324.223,
+      "sim": 358.494,
+      "event": "spawn",
+      "centre": [
+        2.265,
+        -0.86,
+        0.9
+      ],
+      "trigger_distance": 2.232,
+      "late": false
+    },
+    {
+      "wall": 1791703324.225,
+      "sim": 358.496,
+      "event": "spawn_confirmed"
+    },
+    {
+      "wall": 1791703325.132,
+      "sim": 358.768,
+      "event": "perceived",
+      "voxel": [
+        2.05,
+        -0.95,
+        1.45
+      ],
+      "count": 720
+    },
+    {
+      "wall": 1791703397.444,
+      "sim": 375.708,
+      "event": "arrived"
+    },
+    {
+      "wall": 1791703415.09,
+      "sim": 379.804,
+      "event": "landed"
+    }
+  ],
+  "final_armed": false,
+  "completed_groups": 10,
+  "clearance_protocol": "Remove box; face observed obstacle; wait active occupancy zero"
+}

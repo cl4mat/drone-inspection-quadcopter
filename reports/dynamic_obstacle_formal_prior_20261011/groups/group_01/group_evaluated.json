@@ -1,0 +1,111 @@
+{
+  "samples": 7208,
+  "min_clearance": -0.0432,
+  "max_deviation_from_line": 1.7712,
+  "max_lateral_deviation_m": 1.7643,
+  "deviation_after_box": 0.3414,
+  "route_return_window": 404,
+  "return_progress": 5.694,
+  "space_wait_seen": true,
+  "space_wait_samples": 1370,
+  "arrival_state": "HOLD",
+  "final_goal_error": 0.094,
+  "perception_hits": 1,
+  "frame_residual": 0.0515,
+  "goal_unchanged": true,
+  "reached_completed": true,
+  "avoidance_manoeuvre": true,
+  "returned_to_route": true,
+  "code": "F3_COLLISION",
+  "reason": "whole-airframe safety envelope reached the box (clearance -0.043 m)",
+  "mode": "experiment",
+  "ok": false,
+  "events": [
+    {
+      "event": "initial_pose_origin_confirmed",
+      "sim": null,
+      "wall": 1791696845.733
+    },
+    {
+      "event": "ready",
+      "sim": 40.03,
+      "wall": 1791697016.488
+    },
+    {
+      "event": "goal_issued",
+      "goal_odom": [
+        5.235,
+        -1.445,
+        0.97
+      ],
+      "goal_world": [
+        5.499,
+        -1.443,
+        1.261
+      ],
+      "sim": 51.534,
+      "start_world": [
+        -0.002,
+        0.053,
+        1.261
+      ],
+      "wall": 1791697065.143
+    },
+    {
+      "centre": [
+        2.412,
+        -0.601,
+        0.9
+      ],
+      "event": "spawn",
+      "late": false,
+      "sim": 54.734,
+      "trigger_distance": 2.233,
+      "wall": 1791697078.853
+    },
+    {
+      "event": "spawn_confirmed",
+      "sim": 54.736,
+      "wall": 1791697078.855
+    },
+    {
+      "count": 720,
+      "event": "perceived",
+      "sim": 54.934,
+      "voxel": [
+        2.25,
+        -0.45,
+        1.45
+      ],
+      "wall": 1791697079.559
+    },
+    {
+      "event": "landed",
+      "sim": 226.882,
+      "wall": 1791697821.811
+    },
+    {
+      "error": "type object got multiple values for keyword argument 'sim'",
+      "event": "failed",
+      "sim": 226.884,
+      "wall": 1791697821.814
+    }
+  ],
+  "wall_seconds": 1025.7,
+  "injection": {
+    "centre": [
+      2.4122,
+      -0.6011,
+      0.9
+    ],
+    "trigger_distance": 2.233,
+    "late": false
+  },
+  "perception_hits_at_first_event": 720,
+  "goal_messages": 1,
+  "scoring_recovered": true,
+  "recovery_note": "Original arrival event raised duplicate sim keyword after COMPLETED; score recovered from unchanged raw poses, perception event and archived goal. Original group.json retained.",
+  "world_event_coordinate_rounding_m": 0.0005,
+  "archived_goal_unchanged": true,
+  "arrival_sim_s": 222.652
+}

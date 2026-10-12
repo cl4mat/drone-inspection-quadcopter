@@ -2,6 +2,9 @@
 # Own the complete simulation process groups so Ctrl-C leaves no gzserver.
 set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+export DRONE_PROCESS_ROOT="$project_root"
+export DRONE_SHOW_GAZEBO="${DRONE_SHOW_GAZEBO:-0}"
+python3 "$project_root/start/manage_processes.py" register "$$"
 source /opt/ros/noetic/setup.bash
 source "$project_root/devel/setup.bash"
 unset ROS_IP
@@ -69,18 +72,22 @@ cleanup() {
   for process_group in "${process_groups[@]}"; do
     kill -TERM -- "-$process_group" 2>/dev/null || true
   done
+  python3 "$project_root/start/manage_processes.py" unregister "$$" || true
   wait || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 cd "$project_root"
+default_map="$project_root/start/maps/inspection_building.dmap"
+[[ "${DRONE_SIM_PROFILE:-building}" != legacy ]] || default_map="$project_root/start/maps/inspection_demo_scene.dmap"
 online_mode=false
 if [[ "${DRONE_PREBUILT_MAP+x}" == x && -z "${DRONE_PREBUILT_MAP:-}" ]]; then online_mode=true; fi
-setsid roslaunch drone_stack stack.launch gui:=false \
+setsid roslaunch drone_stack stack.launch profile:="${DRONE_SIM_PROFILE:-building}" gui:=false \
+  optional_managers:="${DRONE_OPTIONAL_MANAGERS:-true}" \
   heartbeat_diagnostics:="${DRONE_RECORD_HEARTBEAT:-false}" \
   online_mode:="$online_mode" \
   lio_latency_diagnostics:="${DRONE_RECORD_LIO_TIMING:-false}" \
-  prebuilt_map:="${DRONE_PREBUILT_MAP-$project_root/start/maps/inspection_demo_scene.dmap}" \
+  prebuilt_map:="${DRONE_PREBUILT_MAP-$default_map}" \
   fcu_url:="${DRONE_FCU_URL:-udp://:14540@127.0.0.1:14557}" > "$log_dir/stack.log" 2>&1 &
 process_groups+=("$!")
 python3 - <<'PY'

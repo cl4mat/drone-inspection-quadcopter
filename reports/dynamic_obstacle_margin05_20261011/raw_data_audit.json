@@ -1,0 +1,107 @@
+{
+  "verified": 10,
+  "success": 10,
+  "failure": 0,
+  "checks": [
+    {
+      "group": "group_01",
+      "code": "SUCCESS",
+      "raw_samples": 964,
+      "min_clearance_raw": 0.130644862407995,
+      "endpoint_error_using_rounded_event_goal": 0.022065357463680442,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_02",
+      "code": "SUCCESS",
+      "raw_samples": 1023,
+      "min_clearance_raw": 0.12352456484868013,
+      "endpoint_error_using_rounded_event_goal": 0.05950596608744369,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_03",
+      "code": "SUCCESS",
+      "raw_samples": 1011,
+      "min_clearance_raw": 0.12110544998109518,
+      "endpoint_error_using_rounded_event_goal": 0.05947310316437205,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_04",
+      "code": "SUCCESS",
+      "raw_samples": 1214,
+      "min_clearance_raw": 0.2767023865777335,
+      "endpoint_error_using_rounded_event_goal": 0.061555990772628744,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_05",
+      "code": "SUCCESS",
+      "raw_samples": 695,
+      "min_clearance_raw": 0.08809999999999996,
+      "endpoint_error_using_rounded_event_goal": 0.06751651649781679,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_06",
+      "code": "SUCCESS",
+      "raw_samples": 1142,
+      "min_clearance_raw": 0.11139999999999983,
+      "endpoint_error_using_rounded_event_goal": 0.06047619366329191,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_07",
+      "code": "F4_GOAL_LOST",
+      "raw_samples": 2438,
+      "min_clearance_raw": 1.2374,
+      "endpoint_error_using_rounded_event_goal": 4.073828814518352,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_08",
+      "code": "SUCCESS",
+      "raw_samples": 693,
+      "min_clearance_raw": 0.10510194020613295,
+      "endpoint_error_using_rounded_event_goal": 0.08595644245779334,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_09",
+      "code": "SUCCESS",
+      "raw_samples": 756,
+      "min_clearance_raw": 0.0775638596041372,
+      "endpoint_error_using_rounded_event_goal": 0.09764276726926563,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    },
+    {
+      "group": "group_10",
+      "code": "SUCCESS",
+      "raw_samples": 730,
+      "min_clearance_raw": 0.08279999999999987,
+      "endpoint_error_using_rounded_event_goal": 0.10625765854751378,
+      "endpoint_check_tolerance_m": 0.001,
+      "passed": true
+    }
+  ],
+  "collision_free_success": 10,
+  "collision_free_rate_pct": 100.0,
+  "goal_completed": 9,
+  "goal_completion_rate_pct": 90.0,
+  "criterion": "observed obstacle and minimum conservative 0.40m whole-airframe envelope clearance > 0",
+  "goal_completion_success": 9,
+  "goal_completion_failure": 1,
+  "reclassification_note": "Collision avoidance success is defined per user instruction as no collision: all 10 groups had obstacle perception and positive conservative airframe clearance. Group 07 remained safely in HOLD after EGO rejected an unsafe candidate local path; it did not complete its navigation goal (raw terminal code F4_GOAL_LOST).",
+  "returned_to_route": 9,
+  "route_return_rate_pct": 90.0
+}

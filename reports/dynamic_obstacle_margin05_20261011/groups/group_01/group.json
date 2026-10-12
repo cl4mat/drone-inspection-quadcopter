@@ -1,0 +1,143 @@
+{
+  "arrival_state": "HOLD",
+  "avoidance_manoeuvre": true,
+  "code": "SUCCESS",
+  "deviation_after_box": 0.3307,
+  "events": [
+    {
+      "event": "initial_pose_origin_confirmed",
+      "sim": null,
+      "wall": 1791698858.961
+    },
+    {
+      "event": "ready",
+      "sim": 40.678,
+      "wall": 1791699033.502
+    },
+    {
+      "event": "goal_issued",
+      "goal_odom": [
+        5.241,
+        -1.447,
+        0.971
+      ],
+      "goal_world": [
+        5.505,
+        -1.446,
+        1.263
+      ],
+      "sim": 51.39,
+      "start_world": [
+        0.004,
+        0.05,
+        1.263
+      ],
+      "wall": 1791699079.335
+    },
+    {
+      "centre": [
+        2.42,
+        -0.588,
+        0.9
+      ],
+      "event": "spawn",
+      "late": false,
+      "sim": 54.826,
+      "trigger_distance": 2.234,
+      "wall": 1791699094.248
+    },
+    {
+      "event": "spawn_confirmed",
+      "sim": 54.828,
+      "wall": 1791699094.25
+    },
+    {
+      "count": 720,
+      "event": "perceived",
+      "sim": 55.024,
+      "voxel": [
+        2.25,
+        -0.65,
+        1.45
+      ],
+      "wall": 1791699094.853
+    },
+    {
+      "event": "arrived",
+      "sim": 77.47,
+      "wall": 1791699190.991
+    },
+    {
+      "event": "landed",
+      "sim": 81.824,
+      "wall": 1791699209.796
+    }
+  ],
+  "final_goal_error": 0.0222,
+  "frame_residual": 0.0287,
+  "goal_unchanged": true,
+  "injection": {
+    "centre": [
+      2.420071595151133,
+      -0.5875790902946959,
+      0.9
+    ],
+    "late": false,
+    "trigger_distance": 2.233890631956159
+  },
+  "max_deviation_from_line": 1.1353,
+  "max_lateral_deviation_m": 0.4552,
+  "min_clearance": 0.1306,
+  "mode": "experiment",
+  "ok": true,
+  "perception_hits": 720,
+  "reached_completed": true,
+  "reason": "perceived, avoided, returned to route, reached the original goal",
+  "return_progress": 5.579,
+  "returned_to_route": true,
+  "route_return_window": 399,
+  "samples": 964,
+  "space_wait_samples": 132,
+  "space_wait_seen": true,
+  "voxels": {
+    "added": 8235315,
+    "age": {
+      "bins": [
+        565,
+        13,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "count": 578,
+      "max": 0.804,
+      "max_gap": 3.498,
+      "mean": 0.115
+    },
+    "epoch": 1791699030290640286,
+    "messages": 578,
+    "origin": [
+      -32.0,
+      -24.0,
+      -4.5
+    ],
+    "resolution": 0.1,
+    "revision": 419,
+    "shape": [
+      640,
+      480,
+      120
+    ],
+    "stamp": 81.726
+  },
+  "wall_seconds": 400.2,
+  "whole_airframe_envelope_radius_m": 0.4
+}

@@ -8,6 +8,7 @@
 #include <livox_ros_driver2/CustomMsg.h>
 #include <gazebo/gazebo_client.hh>
 #include <gazebo/transport/transport.hh>
+#include <list>
 #include <gazebo/msgs/msgs.hh>
 #include <atomic>
 #include <chrono>
@@ -61,7 +62,16 @@ class NativeLivoxAdapter {
     while(ros::ok() && !ros::service::exists("/gazebo/get_world_properties",false))ros::WallDuration(.2).sleep();
     if(!ros::ok())return;
     if(!gazebo::client::setup()) {ROS_FATAL("Gazebo transport initialization failed");ros::shutdown();return;}
-    transport_ready_=true;node_.reset(new gazebo::transport::Node());node_->Init(world_);
+    transport_ready_=true;
+    if(!private_.hasParam("gazebo_scan_topic")) {
+      std::list<std::string> namespaces;
+      for(int retry=0;ros::ok() && retry<50 && namespaces.empty();++retry) {
+        gazebo::transport::get_topic_namespaces(namespaces);if(namespaces.empty())ros::WallDuration(.1).sleep();
+      }
+      if(namespaces.size()!=1) {ROS_FATAL("Expected one Gazebo world for native lidar; set gazebo_scan_topic explicitly for multiple worlds");ros::shutdown();return;}
+      world_=namespaces.front();topic_="/gazebo/"+world_+"/inspection_quad/base_link/mid360_sim/scan";
+    }
+    node_.reset(new gazebo::transport::Node());node_->Init(world_);
     scan_sub_=node_->Subscribe(topic_,&NativeLivoxAdapter::scan,this);
     ROS_INFO("Native simulated lidar connected: %s; actual Gazebo measurement timestamps",topic_.c_str());
   }

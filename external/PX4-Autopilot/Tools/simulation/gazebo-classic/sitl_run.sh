@@ -133,7 +133,7 @@ if [ -x "$(command -v gazebo)" ]; then
 	if [ "$model" == "inspection_quad" ]; then spawn_z=0.17; fi
 	# inspection_ros_spawn: use the owned ROS service, not Gazebo discovery.
 	if [[ "$model" == "inspection_quad" && "$ROS_VERSION" == "1" ]]; then
-		if ! timeout --signal=TERM --kill-after=5s 60s rosrun gazebo_ros spawn_model -sdf -file "${modelpath}/${model}/${model_name}.sdf" -model "$model" -x "${DRONE_SPAWN_X:-1.01}" -y "${DRONE_SPAWN_Y:-0.98}" -z "${DRONE_SPAWN_Z:-$spawn_z}" -Y "${DRONE_SPAWN_YAW:-0}"; then
+		if ! timeout --signal=TERM --kill-after=5s 60s rosrun gazebo_ros spawn_model -sdf -file "${modelpath}/${model}/${model_name}.sdf" -model "$model" -x "${DRONE_SPAWN_X:-0}" -y "${DRONE_SPAWN_Y:-0}" -z "${DRONE_SPAWN_Z:-$spawn_z}" -Y "${DRONE_SPAWN_YAW:-0}"; then
 			echo "Inspection model spawn failed or timed out" >&2
 			kill -TERM "$SIM_PID" 2>/dev/null || true
 			# inspection_spawn_cleanup_bounded

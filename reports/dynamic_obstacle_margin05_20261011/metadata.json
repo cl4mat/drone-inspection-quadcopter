@@ -1,0 +1,46 @@
+{
+  "started": "2026-10-11T14:47:19",
+  "feasibility": false,
+  "groups": 10,
+  "forward": 4.2,
+  "height": 1.2,
+  "obstacle_ahead": 2.2,
+  "obstacle_size": [
+    0.3,
+    2.0,
+    1.8
+  ],
+  "laterals": [
+    -1.5,
+    0.0,
+    1.5
+  ],
+  "goal_retries": 8,
+  "max_map_age_s": 4.0,
+  "startup_min_time_s": 20.0,
+  "horizontal_obstacle_inflation_m": 0.5,
+  "prebuilt_map": "$PROJECT_ROOT/start/maps/inspection_building.dmap",
+  "launch": "start_simulation.sh --no-gui, measured prebuilt map",
+  "slow_simulator_note": "The simulated clock runs at roughly 0.25x real time on this machine. What ages a grid map is wall-clock pipeline delay, but flight_manager compares that age against max_map_age_s in simulation seconds, so the same Faster-LIO/voxel-carving lag has to be compared in the same clock domain. The 2.0 s shipped default is crossed during ordinary flight and navigation is cancelled before the obstacle exists. DRONE_MAX_MAP_AGE_S is therefore raised to 4 simulation seconds for this experiment (the shipped default is unchanged), the driver records the age on every sample and the per-delta peak in group.json, and any navigation the deadline does cancel is re-issued by the driver as a bounded, recorded goal_resend event.",
+  "criteria": {
+    "trigger": "box voxel in /grid_map/voxel_delta + motion response",
+    "collision": "truth conservative 0.40 m whole-airframe envelope clearance > 0",
+    "arrival": "terminal COMPLETED and truth endpoint error <= 0.30 m",
+    "route_return": "lateral deviation <= 0.35 m after passing the box"
+  },
+  "protocol_notes": "01-05 cold start; 06-07 shared flight A (07 failed); 08-10 shared flight B, empty transfers to fixed FCU start",
+  "forward_by_group": {
+    "group_01": 5.5,
+    "group_02": 5.5,
+    "group_03": 5.5,
+    "group_04": 5.5,
+    "group_05": 4.2,
+    "group_06": 4.2,
+    "group_07": -4.2,
+    "group_08": 4.252319496870041,
+    "group_09": 4.270979714393616,
+    "group_10": 4.2934150218963625
+  },
+  "ready_settle_wall_s": "01-05:3; 06-10:1",
+  "goal_layout": "01-06 positive route; 07 negative return exposure failed; 08-10 positive exposure after empty return to fixed FCU start"
+}

@@ -149,9 +149,11 @@ header += f"""
                  'inspection_ros_spawn')
     replace_once(sitl_run,
                  '-x 1.01 -y 0.98 -z "$spawn_z"; then',
-                 '-x "${DRONE_SPAWN_X:-1.01}" -y "${DRONE_SPAWN_Y:-0.98}" '
+                 '-x "${DRONE_SPAWN_X:-0}" -y "${DRONE_SPAWN_Y:-0}" '
                  '-z "${DRONE_SPAWN_Z:-$spawn_z}" -Y "${DRONE_SPAWN_YAW:-0}"; then',
                  'DRONE_SPAWN_YAW')
+    spawn_script=sitl_run.read_text().replace('${DRONE_SPAWN_X:-1.01}','${DRONE_SPAWN_X:-0}').replace('${DRONE_SPAWN_Y:-0.98}','${DRONE_SPAWN_Y:-0}')
+    if spawn_script!=sitl_run.read_text():sitl_run.write_text(spawn_script)
     replace_once(sitl_run,
                  '\t\t\twait "$SIM_PID" 2>/dev/null || true\n',
                  '\t\t\t# inspection_spawn_cleanup_bounded\n'

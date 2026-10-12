@@ -1,0 +1,54 @@
+{
+  "path": "$PROJECT_ROOT/start/maps/inspection_building.dmap",
+  "bytes": 103913843,
+  "sha256": "51d13dfd3f6730e4a070c7c689188f144070d6d8bf231b489b28d1870cdca1f0",
+  "format": "DRONE_GRID_V2",
+  "frame": "odom",
+  "resolution": 0.1,
+  "shape": [
+    640,
+    480,
+    120
+  ],
+  "record_count": 8135175,
+  "occupied_count": 389403,
+  "observed_free_count": 7745772,
+  "occupied_map_bounds": [
+    [
+      -28.296038740308404,
+      -6.3431328555454325,
+      -0.9341407746076582
+    ],
+    [
+      28.211244082902518,
+      20.25350009132596,
+      7.565859225392343
+    ]
+  ],
+  "archive_validation_seconds": 71.83016973399208,
+  "flight_result": {
+    "passed": true,
+    "completed_points": 59,
+    "map_saved": true,
+    "map_path": "$PROJECT_ROOT/start/maps/inspection_building.dmap"
+  },
+  "final_state": {
+    "phase": "READY",
+    "health": "HEALTHY",
+    "armed": false,
+    "landed_state": "ON_GROUND"
+  },
+  "deadline_met": false,
+  "lidar_min_support_simulation": 10.0,
+  "survey_speed_mps": {
+    "hall": 1.5,
+    "corridor": 1.5,
+    "stairs": 0.4
+  },
+  "limitations": [
+    "多轮接续完成，不是一次不中断飞行",
+    "降低几何门槛仅用于本次仿真，未验证实机",
+    "通过规划扫描路线，不代表严格全覆盖或全部缺陷已修复"
+  ],
+  "sequence_counter_note": "completed_points=59 表示最终序号到达59，不表示最后一轮逐点访问59次；多轮接续及减少中间停靠，实际访问见各轮events.jsonl。"
+}

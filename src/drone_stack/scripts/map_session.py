@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ground-only map/session alignment; no changes to LIO, EKF or control ENU."""
 import json
+import hashlib
 import math
 import os
 import threading
@@ -33,7 +34,9 @@ class MapSessionManager:
     def __init__(self):
         self.lock=threading.RLock();self.latest={};self.receipts={}
         self.ready=False;self.initialized=False;self.prepared=None
+        self.map_context={}
         self.translation=np.zeros(3);self.yaw=0.;self.mode='WAITING'
+        self.legacy=rospy.get_param('/drone/simulation_profile','building')=='legacy'
         self.startup_map=rospy.get_param('~simulation_startup_map','')
         if rospy.get_param('~simulation_online_start',False):self.startup_map=''
         self.startup_loading=False;self.startup_retry_wall=0.
@@ -59,7 +62,7 @@ class MapSessionManager:
                 self.publish('先点选初始位置并拖动朝向，确认后启动Gazebo；当前仿真尚未启动')
             except Exception as exc:self.publish('默认地图无法预览，请选择地图文件：'+str(exc))
         else:
-            rospy.set_param('/drone/simulation_spawn_request',{'x':1.01,'y':.98,'z':.17,'yaw_deg':0.,'mode':'ONLINE'})
+            rospy.set_param('/drone/simulation_spawn_request',{'x':0.,'y':0.,'z':.17,'yaw_deg':0.,'mode':'ONLINE'})
             self.publish('在线模式启动，等待地面定位就绪')
         rospy.Timer(rospy.Duration(.1),self.tick,reset=True)
 
@@ -80,7 +83,7 @@ class MapSessionManager:
 
     def publish(self,message):
         self.ready_pub.publish(Bool(self.ready))
-        self.status_pub.publish(String(json.dumps({'mode':self.mode,'ready':self.ready,'message':message},ensure_ascii=False)))
+        self.status_pub.publish(String(json.dumps({'mode':self.mode,'ready':self.ready,'message':message,'map_context':self.map_context},ensure_ascii=False)))
         pose=PoseStamped();pose.header.frame_id='map';pose.header.stamp=rospy.Time.now()
         pose.pose.position.x,pose.pose.position.y,pose.pose.position.z=self.translation
         q=quaternion_from_euler(0,0,self.yaw)
@@ -94,6 +97,26 @@ class MapSessionManager:
         self.yaw=math.atan2(math.sin(self.yaw),math.cos(self.yaw))
         self.translation=np.array(xyz)-rotation(self.yaw)@np.array([p.x,p.y,p.z])
         self.initialized=True
+        low=np.array(rospy.get_param('/drone/map_navigation_min_xyz',[-12.,-10.,.5]))
+        high=np.array(rospy.get_param('/drone/map_navigation_max_xyz',[12.,10.,6.6]))
+        corners=np.array([[x,y,z] for x in (low[0],high[0]) for y in (low[1],high[1]) for z in (low[2],high[2])])
+        local=(corners-self.translation)@rotation(self.yaw)
+        rospy.set_param('/drone/navigation_min_xyz',local.min(axis=0).tolist())
+        rospy.set_param('/drone/navigation_max_xyz',local.max(axis=0).tolist())
+        rospy.set_param('/drone/odom_max_flight_height_m',float(rospy.get_param('/drone/max_flight_height_m',6.6))-float(self.translation[2]))
+
+
+    def set_map_context(self,path,expected):
+        source=Path(path).resolve();digest=hashlib.sha256()
+        self.map_context={}
+        try:
+            with source.open('rb') as f:
+                for block in iter(lambda:f.read(1024*1024),b''):digest.update(block)
+            info=source.stat()
+            if (info.st_size,info.st_mtime_ns)!=expected:raise ValueError('文件已变化，请重新加载地图')
+            self.map_context=dict(path=str(source),digest=digest.hexdigest(),size=info.st_size,mtime_ns=info.st_mtime_ns)
+        except (OSError,ValueError) as exc:
+            rospy.logwarn('Map region-library identity unavailable: %s',exc)
 
     def load_startup_map(self):
         """Use truth only for one grounded initial map alignment, never pose fusion."""
@@ -115,8 +138,8 @@ class MapSessionManager:
                     dyaw=yaw_of(pose.orientation)-math.radians(spawn['yaw_deg'])
                     if np.linalg.norm(delta)>.1 or abs(math.atan2(math.sin(dyaw),math.cos(dyaw)))>math.radians(5):
                         raise RuntimeError('Gazebo实际出生位姿与用户设置不符，禁止加载导航')
-                request=MapSessionRequest(action='load',path=self.startup_map,x=pose.position.x,
-                                          y=pose.position.y,z=pose.position.z,yaw_deg=math.degrees(yaw_of(pose.orientation)))
+                request=MapSessionRequest(action='load',path=self.startup_map,x=spawn.get('map_x',0.),
+                                          y=spawn.get('map_y',0.),z=spawn.get('map_z',0.),yaw_deg=spawn.get('yaw_deg',0.))
             result=self.service(request)
             if not result.success:raise RuntimeError(result.message)
         except Exception as exc:
@@ -155,14 +178,15 @@ class MapSessionManager:
             res=float(h[2]);origin=np.array(list(map(float,h[3:6])));dims=np.array(list(map(int,h[6:9])));count=int(h[9])
             saved=np.array(list(map(float,h[10:13]))) if len(h)==14 else np.zeros(3)
             saved_yaw=math.radians(float(h[13])) if len(h)==14 else 0.
+            if int(np.prod(dims))>50000000:raise ValueError('地图网格超过读取上限')
             if not math.isfinite(res) or res<=0 or not np.isfinite(origin).all() or not np.isfinite(saved).all() or not math.isfinite(saved_yaw) or any(dims<=0) or count<1 or count>int(np.prod(dims)):raise ValueError('地图元数据无效')
-            occupied=[];seen=set()
+            occupied=[];seen=np.zeros(int(np.prod(dims)),dtype=bool)
             for _ in range(count):
                 row=f.readline().split()
                 if len(row)!=3:raise ValueError('地图记录不完整')
                 address,evidence,free=map(int,row)
-                if address in seen or not 0<=address<int(np.prod(dims)) or not 0<=evidence<=3 or free not in (0,1) or (evidence and free) or not(evidence or free):raise ValueError('地图体素记录无效')
-                seen.add(address)
+                if not 0<=address<int(np.prod(dims)) or seen[address] or not 0<=evidence<=3 or free not in (0,1) or (evidence and free) or not(evidence or free):raise ValueError('地图体素记录无效')
+                seen[address]=True
                 if evidence:
                     occupied.append(address)
             if f.read().strip() or not occupied:raise ValueError('地图多余记录或没有障碍')
@@ -187,15 +211,30 @@ class MapSessionManager:
             return MapSessionResponse(True,'预览完成；Gazebo尚未启动',False)
         if req.action in ('new','online'):
             self.startup_map='';self.prepared=None;self.boot_preview=None;self.preview([])
-            request={'x':1.01,'y':.98,'z':.17,'yaw_deg':0.,'mode':'ONLINE'}
-        elif req.action=='load':
+            request={'x':0.,'y':0.,'z':.17,'yaw_deg':0.,'mode':'ONLINE'}
+        elif req.action in ('load','origin'):
             if not self.prepared or self.prepared[0]!=req.path:raise ValueError('请先打开此地图预览')
             st=Path(req.path).stat()
             if (req.path,st.st_size,st.st_mtime_ns)!=self.prepared:raise ValueError('地图已变化，请重新预览')
-            if not all(math.isfinite(v) for v in [req.x,req.y,req.z,req.yaw_deg]) or max(abs(req.x),abs(req.y))>8 or abs(req.yaw_deg)>180:raise ValueError('出生位置/朝向无效；XY需在±8m内')
-            if not .15<=req.z<=.20:raise ValueError('当前平地场景初始机体Z需为0.15～0.20m（推荐0.17m），不能从空中开始')
-            if np.any(np.linalg.norm(self.boot_preview[:,:2]-[req.x,req.y],axis=1)<.55):raise ValueError('出生位置靠近地图障碍，请保留至少0.55m间距')
-            request={'x':req.x,'y':req.y,'z':req.z,'yaw_deg':req.yaw_deg,'mode':'PRIOR_NAV','map':req.path}
+            x,y,z,yaw=(0.,0.,.17 if self.legacy else 0.,0.) if req.action=='origin' else (req.x,req.y,req.z,req.yaw_deg)
+            if not all(math.isfinite(v) for v in [x,y,z,yaw]) or abs(x)>30 or not -8<=y<=22 or not -.1<=z<=6.4 or abs(yaw)>180:
+                raise ValueError('出生位置/朝向超出建筑导航范围')
+            # Raw 3D check: floors below landed body are support, ceilings are obstacles.
+            delta=self.boot_preview-np.array([x,y,z])
+            support=(np.abs(delta[:,0])<.3)&(np.abs(delta[:,1])<.3)&(delta[:,2]>=-.27)&(delta[:,2]<=-.07)
+            if not self.legacy and np.count_nonzero(support)<3:raise ValueError('所选位置下方没有已观测楼面，请选择楼层并在地面出生')
+            collision=(np.abs(delta[:,0])<.40)&(np.abs(delta[:,1])<.40)&(delta[:,2]>-.06)&(delta[:,2]<.30)
+            if self.legacy:
+                if not .15<=z<=.2:raise ValueError('旧平地场景出生Z需为0.15～0.20m')
+                collision=np.linalg.norm(delta[:,:2],axis=1)<.55
+            if np.any(collision):raise ValueError('出生位置机体空间内有障碍/天花板，请换一个位置')
+            if not self.legacy:
+                local=delta@rotation(math.radians(yaw))-np.array(rospy.get_param('/drone_lio_bridge/sensor_xyz_body',[.27,0.,.10]))
+                size=np.array([rospy.get_param('/ego_planner_node/grid_map/map_size_'+a,v) for a,v in zip('xyz',[64.,48.,12.])]);lower=np.array([-size[0]/2,-size[1]/2,rospy.get_param('/ego_planner_node/grid_map/ground_height',-4.5)]);upper=lower+size
+                if np.any(local.min(axis=0)<lower+np.array([.5,.5,0.])) or np.any(local.max(axis=0)>upper-np.array([.5,.5,0.])):
+                    raise ValueError('此出生位置/朝向会使整张地图超出规划网格，请靠近中心或调整朝向；不会截掉地图继续导航')
+            request={'x':x,'y':y,'z':z+(0. if self.legacy else .17),'yaw_deg':yaw,'mode':'PRIOR_NAV','map':req.path,
+                     'map_x':x,'map_y':y,'map_z':z}
         else:raise ValueError('仿真尚未启动；请设置初始位姿或选择在线模式')
         rospy.set_param('/drone/simulation_spawn_request',request)
         self.boot_pending=False;self.mode='STARTING_SIM'
@@ -211,7 +250,15 @@ class MapSessionManager:
             if reason:return MapSessionResponse(False,reason,self.ready)
             try:
                 if req.action=='prepare':
-                    points,fingerprint=self.read_preview(req.path)
+                    # Startup preview already validated every record. Avoid
+                    # parsing millions of cells again while subscriber callbacks
+                    # wait for this lock, provided the archive is unchanged.
+                    source=Path(req.path).resolve();st=source.stat()
+                    fingerprint=(str(source),st.st_size,st.st_mtime_ns)
+                    if self.boot_preview is not None and self.prepared==fingerprint:
+                        points=self.boot_preview
+                    else:
+                        points,fingerprint=self.read_preview(req.path)
                     self.prepared=fingerprint;self.ready=False;self.mode='ALIGNING'
                     self.preview(points);self.publish('预建地图已显示：点选初始位置并拖动朝向，确认后允许导航')
                     return MapSessionResponse(True,'地图预览就绪，请设置初始位姿',False)
@@ -222,11 +269,11 @@ class MapSessionManager:
                     if not self.prepared or self.prepared[0]!=req.path:raise ValueError('请先打开此地图预览')
                     st=Path(req.path).stat()
                     if (req.path,st.st_size,st.st_mtime_ns)!=self.prepared:raise ValueError('地图文件发生变化，请重新预览')
-                    if not all(math.isfinite(v) for v in [req.x,req.y,req.z,req.yaw_deg]) or max(abs(req.x),abs(req.y))>30 or abs(req.z)>5 or abs(req.yaw_deg)>180:raise ValueError('初始位姿超出允许范围')
+                    if not all(math.isfinite(v) for v in [req.x,req.y,req.z,req.yaw_deg]) or max(abs(req.x),abs(req.y))>30 or abs(req.z)>7 or abs(req.yaw_deg)>180:raise ValueError('初始位姿超出允许范围')
                     old=(self.translation.copy(),self.yaw,self.initialized)
                     self.set_alignment([req.x,req.y,req.z],math.radians(req.yaw_deg))
                     offset=-rotation(-self.yaw)@self.translation
-                    request=MapArchiveRequest(action='load',path=req.path,offset_x=offset[0],offset_y=offset[1],offset_z=offset[2],yaw_deg=math.degrees(-self.yaw),use_map_frame=True,clip_to_navigation_grid=bool(self.startup_map and self.startup_loading))
+                    request=MapArchiveRequest(action='load',path=req.path,offset_x=offset[0],offset_y=offset[1],offset_z=offset[2],yaw_deg=math.degrees(-self.yaw),use_map_frame=True,clip_to_navigation_grid=bool(rospy.get_param('/use_sim_time',False) and self.startup_map and self.startup_loading))
                     try:reply=self.archive(request)
                     except Exception:
                         self.translation,self.yaw,self.initialized=old;raise
@@ -234,6 +281,7 @@ class MapSessionManager:
                         self.translation,self.yaw,self.initialized=old
                         return MapSessionResponse(False,reply.message,self.ready)
                     self.ready=True;self.mode='PRIOR_NAV';self.prepared=None;self.preview([])
+                    self.set_map_context(req.path,(st.st_size,st.st_mtime_ns))
                     self.publish('预建地图已对齐；初始位姿确认，导航已开放')
                     return MapSessionResponse(True,reply.message,True)
                 if req.action=='save' and not self.ready:raise ValueError('初始位姿尚未确认，不能保存')
@@ -242,6 +290,9 @@ class MapSessionManager:
                 if not reply.success:return MapSessionResponse(False,reply.message,self.ready)
                 if req.action in ('new','online'):
                     self.set_alignment([0.,0.,0.],0.);self.ready=True;self.mode='ONLINE';self.prepared=None;self.preview([])
+                    self.map_context={}
+                if req.action=='save':
+                    st=Path(req.path).stat();self.set_map_context(req.path,(st.st_size,st.st_mtime_ns))
                 self.publish(reply.message)
                 return MapSessionResponse(True,reply.message,self.ready)
             except Exception as exc:

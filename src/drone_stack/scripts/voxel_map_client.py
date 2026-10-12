@@ -6,10 +6,15 @@ import time
 import threading
 import numpy as np
 import rospy
+from rospy.numpy_msg import numpy_msg
 from std_msgs.msg import String
 from plan_env.msg import VoxelUpdate
-from plan_env.srv import GetVoxelSnapshot
+from plan_env.srv import GetVoxelSnapshot,GetVoxelSnapshotResponse
 from trajectory_guard import PackedCells
+
+
+class NumpyVoxelSnapshot(GetVoxelSnapshot):
+    _response_class=numpy_msg(GetVoxelSnapshotResponse)
 
 
 class VoxelMapClient:
@@ -19,8 +24,8 @@ class VoxelMapClient:
         self.status_pub=rospy.Publisher('~voxel_stream_status',String,queue_size=1,latch=True)
         self.status_last=0.;self.resyncs=0
         self.epoch=0;self.revision=0;self.stamp=rospy.Time(0);self.occupied=None;self.free=None
-        self.snapshot=rospy.ServiceProxy('/grid_map/get_voxel_snapshot',GetVoxelSnapshot)
-        self.subscriber=rospy.Subscriber('/grid_map/voxel_delta',VoxelUpdate,self.receive,
+        self.snapshot=rospy.ServiceProxy('/grid_map/get_voxel_snapshot',NumpyVoxelSnapshot)
+        self.subscriber=rospy.Subscriber('/grid_map/voxel_delta',numpy_msg(VoxelUpdate),self.receive,
                                         queue_size=100,buff_size=8*1024*1024,tcp_nodelay=True)
 
     def apply(self,m):
@@ -33,7 +38,7 @@ class VoxelMapClient:
         if not m.full and (m.epoch!=self.epoch or m.base_revision!=self.revision or m.revision!=m.base_revision+1):
             raise ValueError('Voxel revision gap')
         size=math.prod(self.shape)
-        arrays=[np.asarray(v,dtype=np.int64) for v in [m.occupied_added,m.occupied_removed,m.free_added,m.free_removed]]
+        arrays=[np.asarray(v) if isinstance(v,np.ndarray) and v.dtype==np.uint32 else np.asarray(v,dtype=np.int64) for v in [m.occupied_added,m.occupied_removed,m.free_added,m.free_removed]]
         if any(len(a)>size or (len(a) and (a.min()<0 or a.max()>=size)) for a in arrays):raise ValueError('Invalid voxel IDs')
         if m.full and (m.base_revision or len(arrays[1]) or len(arrays[3])):raise ValueError('Malformed full voxel snapshot')
         if m.full:

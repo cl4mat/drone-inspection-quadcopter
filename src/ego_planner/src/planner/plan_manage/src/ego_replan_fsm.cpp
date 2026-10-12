@@ -2,9 +2,26 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <mutex>
 
 namespace ego_planner
 {
+  namespace {
+    bool navigationContains(double x,double y,double z) {
+      static std::vector<double> lo,hi;
+      static double ceiling=6.4;static ros::WallTime checked;static std::mutex mutex;
+      std::lock_guard<std::mutex> guard(mutex);
+      if(lo.empty() || (ros::WallTime::now()-checked).toSec()>.5) {
+        ros::param::param<std::vector<double>>("/drone/navigation_min_xyz",lo,{-12.,-10.,.5});
+        ros::param::param<std::vector<double>>("/drone/navigation_max_xyz",hi,{12.,10.,6.6});
+        ceiling=ros::param::param<double>("/drone/odom_max_flight_height_m",6.6)-.2;
+        checked=ros::WallTime::now();
+      }
+      return lo.size()==3 && hi.size()==3 && std::isfinite(x) && std::isfinite(y) && std::isfinite(z) &&
+        x>=lo[0] && x<=hi[0] && y>=lo[1] && y<=hi[1] && z>=lo[2] && z<=std::min(hi[2],ceiling);
+    }
+  }
+
 
   void EGOReplanFSM::init(ros::NodeHandle &nh)
   {
@@ -59,6 +76,16 @@ namespace ego_planner
 
     bspline_pub_ = nh.advertise<ego_planner::Bspline>("/planning/bspline", 10);
     data_disp_pub_ = nh.advertise<ego_planner::DataDisp>("/planning/data_display", 100);
+    ros::NodeHandle heartbeat_node(nh);
+    heartbeat_node.setCallbackQueue(&heartbeat_queue_);
+    heartbeat_timer_=heartbeat_node.createTimer(ros::Duration(.1),[this](const ros::TimerEvent&){
+      ego_planner::DataDisp heartbeat;
+      heartbeat.header.stamp=ros::Time::now();
+      heartbeat.fsm_state=heartbeat_state_.load();
+      data_disp_pub_.publish(heartbeat);
+    });
+    heartbeat_spinner_.reset(new ros::AsyncSpinner(1,&heartbeat_queue_));
+    heartbeat_spinner_->start();
 
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET && !use_global_route_)
       waypoint_sub_ = nh.subscribe("/waypoint_generator/waypoints", 1, &EGOReplanFSM::waypointCallback, this);
@@ -103,13 +130,14 @@ namespace ego_planner
     clearLocalPlan();
     route_points_.clear(); route_stamp_=ros::Time(0);
     terminal_approach_=false;terminal_entry_planned_=false;
+    inspection_route_=req.inspection;continuous_route_=req.continuous && req.inspection;
     if (!req.enabled) { reply.success=true; reply.message="Previous local curve cleared"; return true; }
     const auto &p=req.goal.pose.position;
     const double age=(ros::Time::now()-odom_stamp_).toSec();
     if (!have_odom_ || odom_stamp_.isZero() || age<-.02 || age>.7 ||
         req.goal.header.frame_id!="odom" || !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
-        fabs(p.x)>8 || fabs(p.y)>8 || p.z<.5 || p.z>2.5 ||
-        !std::isfinite(req.speed_mps) || req.speed_mps<.1 || req.speed_mps>1.) {
+        !navigationContains(p.x,p.y,p.z) ||
+        !std::isfinite(req.speed_mps) || req.speed_mps<.1 || req.speed_mps>ros::param::param<double>("/drone/max_navigation_speed_mps",1.5)) {
       reply.success=false; reply.message="Invalid goal, speed or stale start odometry"; return true;
     }
     navigation_speed_=req.speed_mps;
@@ -135,7 +163,7 @@ namespace ego_planner
   {
     double speed = 0.5;
     ros::param::get("/drone/navigation_speed_request", speed);
-    if (!std::isfinite(speed) || speed < 0.1 || speed > 1.0) {
+    if (!std::isfinite(speed) || speed < 0.1 || speed > ros::param::param<double>("/drone/max_navigation_speed_mps",1.5)) {
       reply.success = false; reply.message = "Invalid navigation speed"; return true;
     }
     // This service runs on the planner's single callback thread, before the
@@ -306,6 +334,7 @@ namespace ego_planner
     static string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP"};
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
+    heartbeat_state_.store(static_cast<int>(new_state));
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
   }
 
@@ -323,6 +352,8 @@ namespace ego_planner
 
   void EGOReplanFSM::execFSMCallback(const ros::TimerEvent &e)
   {
+    // Node liveness is published by the independent heartbeat queue. Map and
+    // adopted trajectory freshness remain separate flight-manager gates.
     if (!planning_enabled_)
       return;
     
@@ -338,9 +369,6 @@ namespace ego_planner
       fsm_num = 0;
     }
 
-    data_disp_.fsm_state = static_cast<int>(exec_state_);
-    data_disp_.header.stamp = ros::Time::now();
-    data_disp_pub_.publish(data_disp_);
     if ((exec_state_ == GEN_NEW_TRAJ || exec_state_ == REPLAN_TRAJ) &&
         !last_failed_plan_.isZero() && (ros::Time::now()-last_failed_plan_).toSec() < 0.2)
       return; // Publish heartbeat above even while backing off failed planning.
@@ -441,7 +469,7 @@ namespace ego_planner
       // mistaken for a short final approach.
       const double approach_distance=std::max(terminal_distance_,
           navigation_speed_*navigation_speed_/(2*terminal_deceleration_)+.3);
-      if (use_global_route_ && !terminal_entry_planned_ &&
+      if (use_global_route_ && !continuous_route_ && !terminal_entry_planned_ &&
           remainingRouteDistance(pos) <= approach_distance &&
           t_cur < info->duration_ - .1) {
         terminal_approach_=true;terminal_entry_planned_=true;
@@ -457,7 +485,7 @@ namespace ego_planner
             info->velocity_traj_.evaluateDeBoorT(info->duration_).norm()<=.03 &&
             (time_now-info->start_time_).toSec()<info->duration_+terminal_settle_time_)
           return;
-        if (use_global_route_ && ((end_pt_-odom_pos_).norm()>.15 || odom_vel_.norm()>.15)) {
+        if (use_global_route_ && (continuous_route_ || (end_pt_-odom_pos_).norm()>.15 || odom_vel_.norm()>.15)) {
           have_new_target_=true;
           changeFSMExecState(GEN_NEW_TRAJ,"ROUTE_CONTINUE");
           return;
@@ -467,7 +495,7 @@ namespace ego_planner
         changeFSMExecState(WAIT_TARGET, "FSM");
         return;
       }
-      else if ((end_pt_ - pos).norm() < no_replan_thresh_)
+      else if (!continuous_route_ && (end_pt_ - pos).norm() < no_replan_thresh_)
       {
         // cout << "near end" << endl;
         return;
@@ -725,7 +753,7 @@ namespace ego_planner
         {
           const double angle=direction*2.0*M_PI/16.0;
           Eigen::Vector3d p=desired+Eigen::Vector3d(radius*cos(angle),radius*sin(angle),0);
-          if (fabs(p.x())>8 || fabs(p.y())>8 || p.z()<0.5 || p.z()>2.5 ||
+          if (!navigationContains(p.x(),p.y(),p.z()) ||
               !map->isInMap(p) || map->getInflateOccupancy(p)!=0 ||
               (p-start_pt_).norm()>planning_horizen_+0.2 ||
               (p-end_pt_).norm() >= (start_pt_-end_pt_).norm()-0.1) continue;
@@ -769,7 +797,7 @@ namespace ego_planner
     for (const auto &pose:msg.poses) {
       const auto &p=pose.pose.position;
       Eigen::Vector3d v(p.x,p.y,p.z);
-      if (!v.allFinite() || fabs(v.x())>8 || fabs(v.y())>8 || v.z()<.5 || v.z()>2.5) return false;
+      if (!v.allFinite() || !navigationContains(v.x(),v.y(),v.z())) return false;
       if (points.empty() || (points.back()-v).norm()>1e-5) points.push_back(v);
     }
     if (points.size()<2 || (points.back()-end_pt_).norm()>.02) return false;
@@ -780,13 +808,24 @@ namespace ego_planner
   void EGOReplanFSM::globalRouteCallback(const ego_planner::GlobalRouteConstPtr &msg)
   {
     if (!use_global_route_ || (!planning_enabled_ && !prepared_start_) || msg->task_id!=route_sequence_) return;
+    if (inspection_route_ && !msg->inspection)return;
+    if (inspection_route_ && msg->blocked) {route_points_.clear();route_stamp_=ros::Time(0);return;}
     // Empty/partial routes mean the front end is searching. Suspend target
     // generation until a complete replacement arrives; safety still checks
     // the currently active local curve against the latest occupied map.
     if (msg->path.poses.size()<2) {
       route_points_.clear();route_stamp_=ros::Time(0);return;
     }
-    if (!installRoute(msg->path)) route_points_.clear();
+    const Eigen::Vector3d old_end=end_pt_;
+    if (inspection_route_ && msg->inspection && !msg->path.poses.empty()) {
+      const auto &p=msg->path.poses.back().pose.position;
+      end_pt_=Eigen::Vector3d(p.x,p.y,p.z);
+    }
+    if (!installRoute(msg->path)) {route_points_.clear();end_pt_=old_end;}
+    else if (inspection_route_ && msg->inspection) {
+      continuous_route_=msg->continuous;
+      if (continuous_route_) {terminal_approach_=false;terminal_entry_planned_=false;}
+    }
   }
 
   double EGOReplanFSM::remainingRouteDistance(const Eigen::Vector3d& position) const
@@ -828,7 +867,7 @@ namespace ego_planner
     const double approach_distance=std::max(terminal_distance_,
         navigation_speed_*navigation_speed_/(2*terminal_deceleration_)+.3);
     const double arc_distance=remainingRouteDistance(start_pt_);
-    if (arc_distance <= approach_distance) terminal_approach_=true;
+    if (!continuous_route_ && arc_distance <= approach_distance) terminal_approach_=true;
     // Retain the current boundary speed while braking. Reducing the velocity
     // limit below it would make a continuous start boundary infeasible.
     const double speed=terminal_approach_ ? std::min(navigation_speed_,std::max(terminal_speed_,start_vel_.norm())) : navigation_speed_;
@@ -846,7 +885,7 @@ namespace ego_planner
         local_target_pt_=from+end_tangent*remaining;seed.push_back(local_target_pt_);break;
       }
       remaining-=length;local_target_pt_=route_points_[i];seed.push_back(local_target_pt_);
-      if(i+1==route_points_.size()) {stop=true;break;}
+      if(i+1==route_points_.size()) {stop=!continuous_route_;break;}
       // Dense smooth samples are a continuous reference: do not stop at each
       // tiny chord or replace the curve by a start-to-horizon straight seed.
       from=route_points_[i];

@@ -25,6 +25,8 @@ else
   unset NO_PXH
 fi
 export PX4_GAZEBO_JOBS=2
-export PX4_SITL_WORLD="${DRONE_SIM_WORLD:-$project_root/src/drone_stack/worlds/inspection_demo.world}"
+default_world="$project_root/src/drone_stack/worlds/inspection_building.world"
+[[ "${DRONE_SIM_PROFILE:-building}" != legacy ]] || default_world="$project_root/src/drone_stack/worlds/inspection_demo.world"
+export PX4_SITL_WORLD="${DRONE_SIM_WORLD:-$default_world}"
 cd "$project_root/external/PX4-Autopilot"
 make px4_sitl_inspection gazebo-classic_inspection_quad

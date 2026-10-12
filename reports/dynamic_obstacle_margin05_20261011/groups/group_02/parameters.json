@@ -1,0 +1,15 @@
+{
+  "forward": 5.5,
+  "lateral": 0,
+  "height": 1.2,
+  "obstacle_ahead": 2.2,
+  "obstacle_size": [
+    0.3,
+    2,
+    1.8
+  ],
+  "obstacle_inflation": 0.5,
+  "startup_min_time": 20,
+  "prebuilt_map": "$PROJECT_ROOT/start/maps/inspection_building.dmap",
+  "note": "Backfilled from recorded driver command and previous cohort metadata; raw goals unchanged"
+}

@@ -1,0 +1,33 @@
+{
+  "summary": {
+    "records": 1,
+    "counted": 1,
+    "success": 0,
+    "rate": 0.0,
+    "infrastructure": 0,
+    "peak_sim_rss_mb": 3686.6,
+    "min_available_mb": 847.6,
+    "finished": "2026-10-11T13:50:42"
+  },
+  "groups": [
+    {
+      "group": "group_01",
+      "lateral": -1.5,
+      "ok": false,
+      "driver_exit": 1,
+      "master_stopped": true,
+      "code": "F3_COLLISION",
+      "reason": "whole-airframe safety envelope reached the box (clearance -0.043 m)",
+      "wall_seconds": 1025.7,
+      "min_clearance": -0.0432,
+      "max_deviation_from_line": 1.7712,
+      "deviation_after_box": 0.3414,
+      "space_wait_samples": 1370,
+      "perception_hits": 1,
+      "final_goal_error": 0.094,
+      "arrival_state": "HOLD",
+      "scoring_recovered": true,
+      "evaluation_source": "groups/group_01/group_evaluated.json"
+    }
+  ]
+}

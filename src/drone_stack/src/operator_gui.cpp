@@ -1,5 +1,8 @@
 #include <plan_env/MapArchive.h>
 #include <drone_stack/MapSession.h>
+#include <drone_stack/BuildingCommand.h>
+#include <QInputDialog>
+#include <QFile>
 #include <QFileDialog>
 #include <QDir>
 #include <QLineEdit>
@@ -7,6 +10,21 @@
 #include <drone_stack/SetMaxFlightHeight.h>
 #include <drone_stack/SetNavigationSpeed.h>
 #include <drone_stack/Takeoff.h>
+#include <drone_stack/PlanInspection.h>
+#include <drone_stack/InspectionCommand.h>
+#include <drone_stack/InspectionRegions.h>
+#include <drone_stack/AiText.h>
+#include <drone_stack/AiGate.h>
+#include <drone_stack/AiCancel.h>
+#include <QSignalBlocker>
+#include <QShortcut>
+#include <QUuid>
+#include <QTabBar>
+#include <QStackedWidget>
+#include <QComboBox>
+#include <QJsonArray>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrentRun>
 #include <geometry_msgs/PointStamped.h>
 #include <mavros_msgs/State.h>
 #include <mavros_msgs/SetMode.h>
@@ -75,6 +93,9 @@
 #include <QVBoxLayout>
 
 #include <cmath>
+#include <chrono>
+#include <fstream>
+#include <iomanip>
 #include <map>
 #include <mutex>
 #include <string>
@@ -107,11 +128,36 @@ public:
     arm_client_ = nh_.serviceClient<std_srvs::Trigger>("/drone/arm");
     takeoff_client_ = nh_.serviceClient<drone_stack::Takeoff>("/drone/takeoff");
     hold_client_ = nh_.serviceClient<std_srvs::Trigger>("/drone/hold");
+    inspection_plan_client_=nh_.serviceClient<drone_stack::PlanInspection>("/drone/inspection/plan");
+    inspection_command_client_=nh_.serviceClient<drone_stack::InspectionCommand>("/drone/inspection/command");
+    inspection_regions_client_=nh_.serviceClient<drone_stack::InspectionRegions>("/drone/inspection/regions");
+    ai_text_client_=nh_.serviceClient<drone_stack::AiText>("/drone/ai/submit_text");
+    ai_gate_client_=nh_.serviceClient<drone_stack::AiGate>("/drone/ai/set_gate");
+    ai_cancel_client_=nh_.serviceClient<drone_stack::AiCancel>("/drone/ai/cancel");
+    ai_session_id_=QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+    ai_heartbeat_pub_=nh_.advertise<std_msgs::String>("/drone/ai/client_heartbeat",1);
+    ai_status_sub_=nh_.subscribe<std_msgs::String>("/drone/ai/status",1,[this](const std_msgs::String::ConstPtr& m){
+      std::lock_guard<std::mutex> guard(mutex_);ai_snapshot_=QJsonDocument::fromJson(QByteArray::fromStdString(m->data)).object();ai_receipt_=ros::WallTime::now();
+    });
+    ai_events_sub_=nh_.subscribe<std_msgs::String>("/drone/ai/events",20,[this](const std_msgs::String::ConstPtr& m){
+      const auto data=QJsonDocument::fromJson(QByteArray::fromStdString(m->data)).object();
+      std::lock_guard<std::mutex> guard(mutex_);ai_pending_events_<<QStringLiteral("[%1 / 步骤%2] %3").arg(data["state"].toString()).arg(data["step"].toInt()+1).arg(data["message"].toString());
+      if(ai_pending_events_.size()>200)ai_pending_events_.removeFirst();
+    });
+    inspection_draft_pub_=nh_.advertise<visualization_msgs::MarkerArray>("/drone/inspection/draft",1,true);
+    inspection_sub_=nh_.subscribe<std_msgs::String>("/drone/inspection/status",1,[this](const std_msgs::String::ConstPtr& m){
+      std::lock_guard<std::mutex> guard(mutex_);inspection_snapshot_=QJsonDocument::fromJson(QByteArray::fromStdString(m->data)).object();inspection_receipt_=ros::WallTime::now();
+    });
     cancel_client_ = nh_.serviceClient<std_srvs::Trigger>("/drone/cancel_goal");
     land_client_ = nh_.serviceClient<std_srvs::Trigger>("/drone/land");
     direct_land_client_ = nh_.serviceClient<mavros_msgs::SetMode>("/mavros/set_mode");
     goal_client_ = nh_.serviceClient<drone_stack::QueueGoal>("/drone/queue_goal");
     speed_client_ = nh_.serviceClient<drone_stack::SetNavigationSpeed>("/drone/set_navigation_speed");
+    building_client_=nh_.serviceClient<drone_stack::BuildingCommand>("/drone/building/command");
+    building_sub_=nh_.subscribe<std_msgs::String>("/drone/building/status",1,[this](const std_msgs::String::ConstPtr& m){
+      std::lock_guard<std::mutex> guard(mutex_);building_snapshot_=QJsonDocument::fromJson(QByteArray::fromStdString(m->data)).object();building_receipt_=ros::WallTime::now();
+    });
+    floor_pub_=nh_.advertise<std_msgs::Float64>("/drone/display_floor_ground",1,true);
     map_session_client_ = nh_.serviceClient<drone_stack::MapSession>("/drone/map_session");
     map_session_sub_ = nh_.subscribe<std_msgs::String>("/drone/map_session_status",1,[this](const std_msgs::String::ConstPtr& m){
       const auto object=QJsonDocument::fromJson(QByteArray::fromStdString(m->data)).object();
@@ -142,6 +188,8 @@ public:
       lio_quality_ = obj.value("quality").toString().toStdString();
       lio_valid_ = obj.value("valid").toBool();
       lio_receipt_ = ros::WallTime::now(); lio_ros_receipt_ = ros::Time::now();
+      timing_source_ = obj.value("publish_monotonic_s").toDouble(0.);
+      timing_receipt_ = steadySeconds();
     });
     heartbeat_sub_ = nh_.subscribe<std_msgs::Header>("/drone/manager_heartbeat", 1, [this](const std_msgs::Header::ConstPtr&) {
       std::lock_guard<std::mutex> guard(mutex_); manager_receipt_ = ros::WallTime::now(); manager_ros_receipt_ = ros::Time::now();
@@ -183,9 +231,31 @@ public:
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, [this] { refresh(); });
     timer->start(150);
+    const QString timingPath=qEnvironmentVariable("DRONE_QT_TIMING_CSV");
+    if(!timingPath.isEmpty()){
+      timing_file_.open(timingPath.toStdString(),std::ios::out);
+      timing_file_ << "kind,sim_s,source_monotonic_s,callback_monotonic_s,ui_monotonic_s,receive_ms,display_ms,service_ack_ms,hold_state_ms,success,phase,armed\n";
+      timing_file_ << std::setprecision(15);
+      // Opt-in experiment automation activates the actual Qt button on the
+      // GUI thread. It never bypasses button enablement or flight-manager gates.
+      timing_command_sub_=nh_.subscribe<std_msgs::String>("/drone/gui/timing_command",1,[this](const std_msgs::String::ConstPtr& m){
+        if(m->data=="finish"){
+          QMetaObject::invokeMethod(this,[this]{
+            timing_file_.flush();timing_file_.close();
+            grab().save(timing_snapshot_path_);
+          },Qt::QueuedConnection);
+          return;
+        }
+        if(m->data!="hold")return;
+        QMetaObject::invokeMethod(this,[this]{if(hold_button_->isEnabled())hold_button_->click();},Qt::QueuedConnection);
+      });
+      const int slash=timingPath.lastIndexOf('/');
+      timing_snapshot_path_=(slash>=0?timingPath.left(slash):QStringLiteral("."))+QStringLiteral("/shot_qt_online.png");
+    }
   }
 
 private:
+  static double steadySeconds(){return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();}
   enum class CardColor { Green, Yellow, Red };
 
   void setCardColor(const QString& key, CardColor color) {
@@ -253,6 +323,24 @@ private:
       }
       if (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease) {
         auto* mouse = static_cast<QMouseEvent*>(event);
+        if (inspection_picking_ && mouse->button()==Qt::LeftButton) {
+          const auto ray=manager_->getViewManager()->getCurrent()->getCamera()->getCameraToViewportRay(
+              mouse->localPos().x()/std::max(1,render_->width()),mouse->localPos().y()/std::max(1,render_->height()));
+          const auto hit=ray.intersects(Ogre::Plane(Ogre::Vector3::UNIT_Z,0.));
+          if(hit.first){
+            const auto point=ray.getPoint(hit.second);
+            if(event->type()==QEvent::MouseButtonPress && inspection_picking_==1)inspection_drag_start_=point;
+            if(event->type()==QEvent::MouseButtonRelease){
+              if(inspection_picking_==1){
+                const auto a=inspection_drag_start_;
+                inspection_polygon_={{a.x,a.y},{point.x,a.y},{point.x,point.y},{a.x,point.y}};
+                inspection_picking_=0;
+              }else if(inspection_polygon_.size()<64)inspection_polygon_.push_back({point.x,point.y});
+              inspection_dirty_=true;publishInspectionDraft();
+            }
+          }
+          return true;
+        }
         if (picking_initial_pose_ && mouse->button()==Qt::LeftButton) {
           const auto ray=manager_->getViewManager()->getCurrent()->getCamera()->getCameraToViewportRay(
               mouse->localPos().x()/std::max(1,render_->width()),mouse->localPos().y()/std::max(1,render_->height()));
@@ -412,6 +500,8 @@ private:
     readiness_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
     main->addWidget(telemetry_);
     main->addWidget(readiness_);
+    page_tabs_=new QTabBar(root);page_tabs_->addTab(QStringLiteral("综合页面"));page_tabs_->addTab(QStringLiteral("区域巡检"));page_tabs_->addTab(QStringLiteral("AI文本控制"));
+    page_tabs_->setExpanding(false);main->addWidget(page_tabs_);
     auto* horizontal = new QSplitter(Qt::Horizontal, root);
     auto* left = new QWidget(horizontal);
     auto* leftLayout = new QVBoxLayout(left);
@@ -450,9 +540,9 @@ private:
     grid->subProp("Cell Size")->setValue(0.5);
     // Use the cloud registered into PX4's local ENU frame.  This keeps the
     // lidar map, EGO voxels and MAVROS odometry aligned in the same RViz view.
-    addDisplay("rviz/PointCloud2", "MID360 点云", "/drone/cloud_fcu_world", "Points");
-    addDisplay("rviz/PointCloud2", "EGO 体素", "/grid_map/occupancy_inflate", "Boxes");
-    addDisplay("rviz/PointCloud2", "预建地图预览", "/drone/prior_map_preview", "Boxes");
+    addDisplay("rviz/PointCloud2", "MID360 点云", "/drone/view/cloud", "Points");
+    addDisplay("rviz/PointCloud2", "EGO 体素", "/drone/view/voxels", "Boxes");
+    addDisplay("rviz/PointCloud2", "预建地图预览", "/drone/view/prior", "Boxes");
     // Explicit render queues implement the requested ordering independently
     // of camera angle and physical altitude. Geometry comes from real routes.
     yellow_layer_ = createRouteLayer("global_yellow", 95);
@@ -477,7 +567,15 @@ private:
       static_cast<rviz::VectorProperty*>(view->subProp("Focal Point"))->setVector(Ogre::Vector3(1.5, 0, 1));
     });
     addDisplay("rviz/MarkerArray", "目标与路径", "/drone/gui/navigation_markers", "");
+    addDisplay("rviz/MarkerArray", "整栋巡检预存路线", "/drone/building/markers", "");
+    addDisplay("rviz/MarkerArray", "巡检区域草稿", "/drone/inspection/draft", "");
+    addDisplay("rviz/MarkerArray", "巡检条带预览", "/drone/inspection/markers", "");
+    addDisplay("rviz/MarkerArray", "巡检覆盖统计", "/drone/inspection/coverage", "");
 
+    for(const auto& name:{QStringLiteral("巡检区域草稿"),QStringLiteral("巡检条带预览"),QStringLiteral("巡检覆盖统计"),QStringLiteral("整栋巡检预存路线")})displays_[name]->setEnabled(false);
+    auto* floorSelector=new QComboBox(left);floorSelector->addItems({QStringLiteral("显示一楼（隐藏天花板）"),QStringLiteral("显示二楼（隐藏天花板）"),QStringLiteral("显示整栋三维地图")});viewTools->addWidget(floorSelector);
+    connect(floorSelector,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){std_msgs::Float64 m;m.data=index==2?-999.:index==1?3.43:-.17;floor_pub_.publish(m);if(index<2 && inspection_height_)inspection_height_->setValue(index==1?4.63:1.03);});
+    std_msgs::Float64 firstFloor;firstFloor.data=-.17;floor_pub_.publish(firstFloor);
     navigation_hint_ = new QLabel(QStringLiteral("红点：目标  |  黄实线：已观测自由  |  黄虚线：待观测参考  |  紫线：执行中的EGO曲线  |  绿线：实际轨迹"), left);
     navigation_hint_->setWordWrap(true);
     navigation_hint_->setFixedHeight(76);
@@ -490,13 +588,15 @@ private:
     connect(view2d, &QPushButton::clicked, this, [this] { picking_goal_ = false; showTopDown(); });
     connect(pickGoal, &QPushButton::clicked, this, [this] {
       picking_initial_pose_=false;
+      inspection_picking_=0;
       picking_goal_ = !picking_goal_;
       if (picking_goal_) showTopDown();
       log(picking_goal_ ? QStringLiteral("连续左键点选目标，按编号依次执行；滚轮缩放，Z使用右侧高度。再次点击按钮结束点选。") : QStringLiteral("已结束点选，现有目标队列继续执行。"));
     });
     horizontal->addWidget(left);
 
-    auto* sideScroll = new QScrollArea(horizontal);
+    side_pages_=new QStackedWidget(horizontal);
+    auto* sideScroll = new QScrollArea(side_pages_);
     sideScroll->setWidgetResizable(true);
     sideScroll->setFixedWidth(420);
     sideScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -535,8 +635,8 @@ private:
     navigation_speed_->setToolTip(QStringLiteral("下一次导航任务采用此规划速度；当前任务及其重规划保持原速度。"));
     opsLayout->addWidget(new QLabel(QStringLiteral("移动速度 m/s")), 2, 0);
     opsLayout->addWidget(navigation_speed_, 2, 1);
-    maximum_height_ = spin(2.5, ops);
-    maximum_height_->setRange(.8, 2.5); maximum_height_->setSingleStep(.1);
+    maximum_height_ = spin(6.6, ops);
+    double configuredHeight=6.6;nh_.param("/drone/configured_max_height_m",configuredHeight,6.6);maximum_height_->setRange(.8, configuredHeight); maximum_height_->setSingleStep(.1);
     maximum_height_->setSuffix(QStringLiteral(" m"));
     maximum_height_->setToolTip(QStringLiteral("机体中心最高 ENU Z，与点选绝对Z同一基准；规划与目标保留0.20m裕量。可在未解锁地面或无任务的健康HOLD时修改。"));
     ceiling_button_ = new QPushButton(QStringLiteral("最高Z（ENU）设置"), ops);
@@ -548,7 +648,7 @@ private:
     opsLayout->addWidget(new QLabel(QStringLiteral("降落按钮位于底部固定操作栏")), 6, 0, 1, 2);
     opsLayout->addWidget(disarm, 7, 0, 1, 2);
     sideLayout->addWidget(ops);
-    auto* mapping = new QGroupBox(QStringLiteral("建图与预建地图导航"),side);
+    auto* mapping = new QGroupBox(QStringLiteral("建图模式 / 巡检模式"),side);
     auto* mappingLayout = new QGridLayout(mapping);
     map_mode_label_ = new QLabel(QStringLiteral("地图模式等待中"),mapping);
     map_mode_label_->setWordWrap(true);
@@ -564,18 +664,18 @@ private:
       const auto path=QFileDialog::getOpenFileName(this,QStringLiteral("选择预建导航地图"),map_file_->text(),QStringLiteral("导航地图 (*.dmap);;所有文件 (*)"));
       if(!path.isEmpty())map_file_->setText(path);
     });
-    map_dx_=spin(1.01,mapping);map_dy_=spin(.98,mapping);map_dz_=spin(.17,mapping);map_yaw_=spin(0.,mapping);
+    map_dx_=spin(0.,mapping);map_dy_=spin(0.,mapping);map_dz_=spin(0.,mapping);map_yaw_=spin(0.,mapping);
     map_dx_->setRange(-30.,30.);map_dy_->setRange(-30.,30.);map_dz_->setRange(-5.,5.);map_yaw_->setRange(-180.,180.);
     for(auto* input:{map_dx_,map_dy_,map_dz_})input->setSingleStep(.1);
     mappingLayout->addWidget(new QLabel(QStringLiteral("初始地图位置 X m")),3,0);mappingLayout->addWidget(map_dx_,3,1);
     mappingLayout->addWidget(new QLabel(QStringLiteral("初始地图位置 Y m")),4,0);mappingLayout->addWidget(map_dy_,4,1);
     mappingLayout->addWidget(new QLabel(QStringLiteral("初始地图位置 Z m")),5,0);mappingLayout->addWidget(map_dz_,5,1);
     mappingLayout->addWidget(new QLabel(QStringLiteral("初始机头朝向 yaw °")),6,0);mappingLayout->addWidget(map_yaw_,6,1);
-    auto* mappingNote=new QLabel(QStringLiteral("默认预建地图：先点出生位置并拖朝向，确认后启动Gazebo。平地机体Z设0.17m。在线模式自动设本次起点。"),mapping);mappingNote->setWordWrap(true);mappingNote->setFixedHeight(80);mappingNote->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);mappingLayout->addWidget(mappingNote,7,0,1,2);
+    auto* mappingNote=new QLabel(QStringLiteral("地图Z=0为一楼起始机体中心。一楼出生Z=0，二楼Z=3.6；选点拖朝向或从原点启动。建图完成后先落地锁定。"),mapping);mappingNote->setWordWrap(true);mappingNote->setFixedHeight(80);mappingNote->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);mappingLayout->addWidget(mappingNote,7,0,1,2);
     initial_pose_button_=new QPushButton(QStringLiteral("点选初始位置并拖动朝向"),mapping);
     mappingLayout->addWidget(initial_pose_button_,8,0,1,2);
     connect(initial_pose_button_,&QPushButton::clicked,this,[this]{picking_goal_=false;showTopDown();picking_initial_pose_=true;log(QStringLiteral("在地图上按下鼠标选位置，拖动并松开设置机头朝向。"));});
-    const std::vector<std::pair<QString,std::string>> operations={{QStringLiteral("开始新建图"),"new"},{QStringLiteral("保存地图"),"save"},{QStringLiteral("打开预建地图预览"),"prepare"},{QStringLiteral("确认初始位姿并加载导航"),"load"},{QStringLiteral("返回在线建图导航"),"online"}};
+    const std::vector<std::pair<QString,std::string>> operations={{QStringLiteral("开始新建图"),"new"},{QStringLiteral("完成建图并生成整栋路线"),"finish"},{QStringLiteral("打开预建地图预览"),"prepare"},{QStringLiteral("确认初始位姿并加载导航"),"load"},{QStringLiteral("返回在线建图导航"),"online"},{QStringLiteral("从地图原点启动仿真"),"origin"}};
     for(size_t i=0;i<operations.size();++i){
       auto* button=new QPushButton(operations[i].first,mapping);map_buttons_.push_back(button);
       mappingLayout->addWidget(button,9+int(i)/2,int(i)%2);
@@ -583,12 +683,16 @@ private:
       const auto action=operations[i].second;
       connect(button,&QPushButton::clicked,this,[this,action]{
         QString path=map_file_->text();
-        if(action=="save"){
+        if(action=="save" || action=="finish"){
           QDir().mkpath(QDir::homePath()+QStringLiteral("/robotproject/project0/start/maps"));
           path=QFileDialog::getSaveFileName(this,QStringLiteral("保存导航地图"),path,QStringLiteral("导航地图 (*.dmap)"));
           if(path.isEmpty())return;
           if(!path.endsWith(QStringLiteral(".dmap")))path+=QStringLiteral(".dmap");
           map_file_->setText(path);
+        }
+        if(action=="finish"){
+          drone_stack::BuildingCommand call;call.request.action="finish";call.request.path=path.toStdString();
+          asyncInspection(building_client_,call,[this](bool ok,const drone_stack::BuildingCommand& result){log(ok?QString::fromStdString(result.response.message):QStringLiteral("整栋路线服务不可用"));});return;
         }
         drone_stack::MapSession service;service.request.action=action;service.request.path=path.toStdString();
         service.request.x=map_dx_->value();service.request.y=map_dy_->value();service.request.z=map_dz_->value();service.request.yaw_deg=map_yaw_->value();
@@ -600,6 +704,8 @@ private:
         }
       });
     }
+    auto* birthFloor=new QComboBox(mapping);birthFloor->addItems({QStringLiteral("出生楼层：一楼（地图Z=0）"),QStringLiteral("出生楼层：二楼（地图Z=3.6）")});mappingLayout->addWidget(birthFloor,13,0,1,2);
+    connect(birthFloor,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int index){map_dz_->setValue(index==1?3.6:0.);});
     sideLayout->addWidget(mapping);
     auto* goals = new QGroupBox(QStringLiteral("局部三维目标 · ROS ENU"), side);
     auto* goalLayout = new QGridLayout(goals);
@@ -622,9 +728,166 @@ private:
     queue_status_ = new QLabel(QStringLiteral("剩余目标：0（含当前）"), goals);
     goalLayout->addWidget(queue_status_, 5, 0, 1, 2);
     sideLayout->addWidget(goals);
+    auto* inspectionScroll=new QScrollArea(side_pages_);inspectionScroll->setWidgetResizable(true);
+    inspectionScroll->setMinimumWidth(310);inspectionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto* inspectionSide=new QWidget(inspectionScroll);inspectionSide->setObjectName("side");
+    auto* inspectionLayout=new QVBoxLayout(inspectionSide);inspectionLayout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+    auto* overviewLink=new QPushButton(QStringLiteral("返回综合页：授权 / 解锁 / 起飞"),inspectionSide);
+    inspectionLayout->addWidget(overviewLink);connect(overviewLink,&QPushButton::clicked,this,[this]{page_tabs_->setCurrentIndex(0);});
+    auto* buildingBox=new QGroupBox(QStringLiteral("整栋巡检 · 预建地图"),inspectionSide);
+    auto* bl=new QGridLayout(buildingBox);building_label_=new QLabel(QStringLiteral("等待整栋任务状态"),buildingBox);
+    building_label_->setWordWrap(true);building_label_->setFixedHeight(100);building_label_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);bl->addWidget(building_label_,0,0,1,2);
+    const std::vector<std::pair<QString,std::string>> buildingOps={{QStringLiteral("一键开始（返原点降落）"),"start"},{QStringLiteral("暂停"),"pause"},{QStringLiteral("继续剩余任务"),"resume"},{QStringLiteral("取消整栋任务"),"cancel"},{QStringLiteral("重新加载预存任务"),"load"},{QStringLiteral("修正拓扑并重新生成"),"regenerate"}};
+    for(size_t i=0;i<buildingOps.size();++i){
+      auto* button=new QPushButton(buildingOps[i].first,buildingBox);building_buttons_.push_back(button);bl->addWidget(button,1+int(i)/2,int(i)%2);
+      const auto action=buildingOps[i].second;
+      connect(button,&QPushButton::clicked,this,[this,action]{
+        drone_stack::BuildingCommand call;call.request.action=action;call.request.path=map_file_->text().toStdString();
+        if(action=="regenerate"){
+          QFile file(map_file_->text()+QStringLiteral(".topology.json"));if(!file.open(QIODevice::ReadOnly)){log(QStringLiteral("请先完成建图生成拓扑草稿"));return;}
+          bool accepted=false;const auto edited=QInputDialog::getMultiLineText(this,QStringLiteral("修正地图拓扑"),QStringLiteral("编辑楼面高度、大厅边界polygon；生成时重新验证实际地图连通与碰撞。"),QString::fromUtf8(file.readAll()),&accepted);
+          if(!accepted)return;call.request.topology_json=edited.toStdString();
+        }
+        asyncInspection(building_client_,call,[this](bool ok,const drone_stack::BuildingCommand& result){log(ok?QString::fromStdString(result.response.message):QStringLiteral("整栋巡检服务不可用"));});
+      });
+    }
+    inspectionLayout->addWidget(buildingBox);
+    auto* knownBox=new QGroupBox(QStringLiteral("已知巡检区域 · 当前地图"),inspectionSide);
+    auto* kl=new QGridLayout(knownBox);
+    known_regions_=new QComboBox(knownBox);known_regions_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    known_regions_->setMinimumContentsLength(12);kl->addWidget(known_regions_,0,0,1,2);
+    known_name_=new QLineEdit(knownBox);known_name_->setPlaceholderText(QStringLiteral("输入区域名称（支持中文）"));known_name_->setMaxLength(64);
+    kl->addWidget(known_name_,1,0,1,2);
+    known_load_=new QPushButton(QStringLiteral("加载为选区"),knownBox);known_refresh_=new QPushButton(QStringLiteral("刷新列表"),knownBox);
+    known_save_=new QPushButton(QStringLiteral("保存为新区域"),knownBox);known_update_=new QPushButton(QStringLiteral("更新所选区域"),knownBox);
+    known_delete_=new QPushButton(QStringLiteral("删除所选区域"),knownBox);
+    kl->addWidget(known_load_,2,0);kl->addWidget(known_refresh_,2,1);kl->addWidget(known_save_,3,0);kl->addWidget(known_update_,3,1);kl->addWidget(known_delete_,4,0,1,2);
+    inspectionLayout->addWidget(knownBox);
+    connect(known_refresh_,&QPushButton::clicked,this,[this]{requestKnownRegions("list");});
+    connect(known_load_,&QPushButton::clicked,this,[this]{loadKnownRegion();});
+    connect(known_save_,&QPushButton::clicked,this,[this]{requestKnownRegions("save");});
+    connect(known_update_,&QPushButton::clicked,this,[this]{requestKnownRegions("update");});
+    connect(known_delete_,&QPushButton::clicked,this,[this]{requestKnownRegions("delete");});
+    auto* inspectionBox=new QGroupBox(QStringLiteral("下视区域巡检 · 预建地图专用"),inspectionSide);
+    auto* il=new QGridLayout(inspectionBox);
+    inspection_status_=new QLabel(QStringLiteral("等待巡检管理器"),inspectionBox);
+    inspection_status_->setWordWrap(true);inspection_status_->setFixedHeight(95);inspection_status_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
+    il->addWidget(inspection_status_,0,0,1,2);
+    inspection_alarm_=new QLabel(QStringLiteral("无巡检异常"),inspectionBox);
+    inspection_alarm_->setWordWrap(true);inspection_alarm_->setFixedHeight(100);inspection_alarm_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);
+    il->addWidget(inspection_alarm_,1,0,1,2);
+    auto* rectangle=new QPushButton(QStringLiteral("框选矩形"),inspectionBox);
+    auto* polygon=new QPushButton(QStringLiteral("绘制多边形"),inspectionBox);
+    auto* closePolygon=new QPushButton(QStringLiteral("完成多边形"),inspectionBox);
+    il->addWidget(rectangle,2,0);il->addWidget(polygon,2,1);il->addWidget(closePolygon,3,0,1,2);
+    inspection_edit_buttons_={rectangle,polygon,closePolygon};
+    for(auto pair:std::vector<std::pair<QPushButton*,int>>{{rectangle,1},{polygon,2}})
+      connect(pair.first,&QPushButton::clicked,this,[this,pair]{
+        picking_goal_=false;picking_initial_pose_=false;showTopDown();inspection_picking_=pair.second;
+        inspection_polygon_.clear();inspection_dirty_=true;publishInspectionDraft();
+        log(pair.second==1?QStringLiteral("拖动鼠标框选矩形巡检区"):QStringLiteral("左键逐点绘制多边形，再点击完成多边形"));
+      });
+    connect(closePolygon,&QPushButton::clicked,this,[this]{inspection_picking_=0;publishInspectionDraft();});
+    inspection_auto_spacing_=new QCheckBox(QStringLiteral("按下视相机自动计算间距"),inspectionBox);
+    il->addWidget(inspection_auto_spacing_,4,0,1,2);
+    auto spin=[inspectionBox](double low,double high,double value,double step){auto* w=new QDoubleSpinBox(inspectionBox);w->setRange(low,high);w->setDecimals(2);w->setValue(value);w->setSingleStep(step);return w;};
+    inspection_spacing_=spin(.1,5.,.5,.1);inspection_overlap_=spin(0.,.8,.2,.05);
+    inspection_speed_=spin(.1,1.,.5,.1);inspection_angle_=spin(0.,179.,0.,5.);
+    inspection_height_=spin(.5,6.4,1.03,.1);
+    inspection_auto_angle_=new QCheckBox(QStringLiteral("自动选择扫描方向"),inspectionBox);inspection_auto_angle_->setChecked(true);
+    inspection_entry_=new QComboBox(inspectionBox);inspection_entry_->addItems({QStringLiteral("自动选择可达入口"),QStringLiteral("候选入口1"),QStringLiteral("候选入口2"),QStringLiteral("候选入口3"),QStringLiteral("候选入口4")});
+    il->addWidget(new QLabel(QStringLiteral("手动间距 m")),5,0);il->addWidget(inspection_spacing_,5,1);
+    il->addWidget(new QLabel(QStringLiteral("自动重叠率")),6,0);il->addWidget(inspection_overlap_,6,1);
+    il->addWidget(new QLabel(QStringLiteral("巡检速度 m/s")),7,0);il->addWidget(inspection_speed_,7,1);
+    il->addWidget(inspection_auto_angle_,8,0,1,2);
+    il->addWidget(new QLabel(QStringLiteral("扫描角度 °")),9,0);il->addWidget(inspection_angle_,9,1);
+    il->addWidget(inspection_entry_,10,0,1,2);
+    il->addWidget(new QLabel(QStringLiteral("巡检高度 地图Z m")),11,0);il->addWidget(inspection_height_,11,1);
+    auto* ihint=new QLabel(QStringLiteral("青色条带、橙色连接为预览；黄色/紫色为真实控制参考/轨迹。加载已知区域后需重新生成路线。"),inspectionBox);
+    ihint->setWordWrap(true);ihint->setFixedHeight(70);ihint->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Fixed);il->addWidget(ihint,12,0,1,2);
+    inspection_plan_button_=new QPushButton(QStringLiteral("生成巡检路线"),inspectionBox);
+    inspection_start_button_=new QPushButton(QStringLiteral("开始巡检"),inspectionBox);
+    inspection_pause_button_=new QPushButton(QStringLiteral("暂停巡检"),inspectionBox);
+    inspection_resume_button_=new QPushButton(QStringLiteral("继续巡检"),inspectionBox);
+    inspection_cancel_button_=new QPushButton(QStringLiteral("取消巡检"),inspectionBox);
+    il->addWidget(inspection_plan_button_,13,0);il->addWidget(inspection_start_button_,13,1);
+    il->addWidget(inspection_pause_button_,14,0);il->addWidget(inspection_resume_button_,14,1);il->addWidget(inspection_cancel_button_,15,0,1,2);
+    auto dirty=[this]{inspection_dirty_=true;};
+    for(auto* w:{inspection_spacing_,inspection_overlap_,inspection_speed_,inspection_angle_,inspection_height_})
+      connect(w,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,dirty);
+    connect(inspection_height_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this]{if(!inspection_polygon_.empty())publishInspectionDraft();});
+    connect(inspection_entry_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,dirty);
+    connect(inspection_auto_spacing_,&QCheckBox::toggled,this,dirty);connect(inspection_auto_angle_,&QCheckBox::toggled,this,dirty);
+    connect(inspection_plan_button_,&QPushButton::clicked,this,[this]{
+      inspection_picking_=0;
+      if(inspection_polygon_.size()<3){log(QStringLiteral("请先框选矩形或完成多边形"));return;}
+      drone_stack::PlanInspection call;call.request.region.header.frame_id="map";call.request.region.header.stamp=ros::Time::now();
+      for(auto p:inspection_polygon_){geometry_msgs::Point32 v;v.x=p.first;v.y=p.second;v.z=inspection_height_->value();call.request.region.polygon.points.push_back(v);}
+      call.request.altitude=inspection_height_->value();call.request.auto_spacing=inspection_auto_spacing_->isChecked();
+      call.request.spacing=inspection_spacing_->value();call.request.overlap=inspection_overlap_->value();call.request.speed=inspection_speed_->value();
+      call.request.angle_deg=inspection_auto_angle_->isChecked()?-1.:inspection_angle_->value();call.request.entry=inspection_entry_->currentIndex();
+      asyncInspection(inspection_plan_client_,call,[this](bool ok,const drone_stack::PlanInspection& result){
+        log(ok?QString::fromStdString(result.response.message):QStringLiteral("巡检规划服务不可用"));
+        if(ok&&result.response.success){inspection_plan_id_=result.response.plan_id;inspection_dirty_=false;}
+      });
+    });
+    for(auto pair:std::vector<std::pair<QPushButton*,std::string>>{{inspection_start_button_,"start"},{inspection_pause_button_,"pause"},{inspection_resume_button_,"resume"},{inspection_cancel_button_,"cancel"}})
+      connect(pair.first,&QPushButton::clicked,this,[this,pair]{
+        drone_stack::InspectionCommand call;call.request.action=pair.second;
+        {std::lock_guard<std::mutex> guard(mutex_);call.request.plan_id=inspection_snapshot_["plan_id"].toString().toStdString();}
+        asyncInspection(inspection_command_client_,call,[this](bool ok,const drone_stack::InspectionCommand& result){log(ok?QString::fromStdString(result.response.message):QStringLiteral("巡检操作服务不可用"));});
+      });
+    inspectionLayout->addWidget(inspectionBox);
+    inspection_front_image_=cameraBox(inspectionLayout,inspectionSide,QStringLiteral("前视处理画面"));
+    inspection_down_image_=cameraBox(inspectionLayout,inspectionSide,QStringLiteral("下视巡检处理画面"));
+    inspectionLayout->addStretch();inspectionScroll->setWidget(inspectionSide);
+    auto* aiPage=new QWidget(side_pages_);auto* al=new QVBoxLayout(aiPage);
+    auto* aiTitle=new QLabel(QStringLiteral("DeepSeek 文本任务控制"),aiPage);aiTitle->setStyleSheet("font-size:20px;font-weight:bold;");al->addWidget(aiTitle);
+    auto* aiAuth=new QHBoxLayout();ai_parse_gate_=new QCheckBox(QStringLiteral("允许云端解析（文字/状态/区域名）"),aiPage);
+    ai_control_gate_=new QCheckBox(QStringLiteral("授权AI执行动作"),aiPage);aiAuth->addWidget(ai_parse_gate_);aiAuth->addWidget(ai_control_gate_);aiAuth->addStretch();al->addLayout(aiAuth);
+    ai_status_label_=new QLabel(QStringLiteral("等待AI服务"),aiPage);ai_status_label_->setWordWrap(true);ai_status_label_->setFixedHeight(80);al->addWidget(ai_status_label_);
+    ai_regions_label_=new QLabel(aiPage);ai_regions_label_->setWordWrap(true);ai_regions_label_->setFixedHeight(55);al->addWidget(ai_regions_label_);
+    ai_input_=new QPlainTextEdit(aiPage);ai_input_->setPlaceholderText(QStringLiteral("例如：起飞1米，然后巡检设备区，最后降落。\n或：前往地图坐标(3, 2, 1.2)。仅使用已知区域名称，不使用语音。"));ai_input_->setMinimumHeight(110);ai_input_->setMaximumHeight(160);al->addWidget(ai_input_);
+    auto* aiButtons=new QHBoxLayout();ai_submit_button_=new QPushButton(QStringLiteral("发送文字（Ctrl+Enter）"),aiPage);
+    ai_cancel_button_=new QPushButton(QStringLiteral("停止AI任务"),aiPage);auto* clearAi=new QPushButton(QStringLiteral("清空显示"),aiPage);
+    aiButtons->addWidget(ai_submit_button_);aiButtons->addWidget(ai_cancel_button_);aiButtons->addWidget(clearAi);aiButtons->addStretch();al->addLayout(aiButtons);
+    al->addWidget(new QLabel(QStringLiteral("AI答复与完整计划（实际完成情况看任务状态）"),aiPage));
+    ai_reply_=new QPlainTextEdit(aiPage);ai_reply_->setReadOnly(true);ai_reply_->setMinimumHeight(120);al->addWidget(ai_reply_,1);
+    al->addWidget(new QLabel(QStringLiteral("执行与异常记录"),aiPage));ai_event_view_=new QPlainTextEdit(aiPage);ai_event_view_->setReadOnly(true);ai_event_view_->setMaximumBlockCount(200);ai_event_view_->setMinimumHeight(120);al->addWidget(ai_event_view_,1);
+    auto* aiNote=new QLabel(QStringLiteral("解析授权与执行授权独立。飞行仍需综合页授权及定位/地图安全门。撤权或停止会中止后续步骤；已有降落继续执行。紧急情况可直接使用下方一键降落。"),aiPage);
+    aiNote->setWordWrap(true);aiNote->setFixedHeight(60);al->addWidget(aiNote);
+    for(auto pair:std::vector<std::pair<QCheckBox*,std::string>>{{ai_parse_gate_,"parse"},{ai_control_gate_,"control"}})
+      connect(pair.first,&QCheckBox::toggled,this,[this,pair](bool enabled){
+        drone_stack::AiGate call;call.request.session_id=ai_session_id_;call.request.gate=pair.second;call.request.enabled=enabled;
+        ai_call_pending_=true;
+        asyncInspection(ai_gate_client_,call,[this](bool ok,const drone_stack::AiGate& result){ai_call_pending_=false;log(ok?QString::fromStdString(result.response.message):QStringLiteral("AI授权服务不可用"));});
+      });
+    connect(ai_submit_button_,&QPushButton::clicked,this,[this]{
+      drone_stack::AiText call;call.request.session_id=ai_session_id_;call.request.text=ai_input_->toPlainText().toStdString();ai_call_pending_=true;
+      asyncInspection(ai_text_client_,call,[this](bool ok,const drone_stack::AiText& result){ai_call_pending_=false;log(ok?QString::fromStdString(result.response.message):QStringLiteral("AI文本服务不可用"));});
+    });
+    auto* submitShortcut=new QShortcut(QKeySequence(Qt::CTRL+Qt::Key_Return),aiPage);
+    connect(submitShortcut,&QShortcut::activated,this,[this]{if(ai_submit_button_->isEnabled())ai_submit_button_->click();});
+    connect(ai_cancel_button_,&QPushButton::clicked,this,[this]{
+      drone_stack::AiCancel call;call.request.session_id=ai_session_id_;ai_call_pending_=true;
+      asyncInspection(ai_cancel_client_,call,[this](bool ok,const drone_stack::AiCancel& result){ai_call_pending_=false;log(ok?QString::fromStdString(result.response.message):QStringLiteral("AI停止服务不可用"));});
+    });
+    connect(clearAi,&QPushButton::clicked,this,[this]{ai_input_->clear();ai_event_view_->clear();});
     sideLayout->addStretch();
     sideScroll->setWidget(side);
-    horizontal->addWidget(sideScroll);
+    side_pages_->addWidget(sideScroll);side_pages_->addWidget(inspectionScroll);side_pages_->addWidget(aiPage);
+    connect(page_tabs_,&QTabBar::currentChanged,this,[this,left,title,horizontal]{
+      const bool wasAi=side_pages_->currentIndex()==2;
+      if(page_tabs_->currentIndex()==2&&!wasAi)saved_split_sizes_=horizontal->sizes();
+      side_pages_->setCurrentIndex(page_tabs_->currentIndex());picking_goal_=false;picking_initial_pose_=false;inspection_picking_=0;
+      left->setVisible(page_tabs_->currentIndex()!=2);
+      if(wasAi&&page_tabs_->currentIndex()!=2&&!saved_split_sizes_.isEmpty())horizontal->setSizes(saved_split_sizes_);
+      title->setText(page_tabs_->currentIndex()==2?QStringLiteral("巡检四旋翼 · AI文本控制"):page_tabs_->currentIndex()==1?QStringLiteral("巡检四旋翼 · 区域巡检"):QStringLiteral("巡检四旋翼 · 综合操作台"));
+      pick_button_->setVisible(page_tabs_->currentIndex()==0);
+      for(const auto& name:{QStringLiteral("巡检区域草稿"),QStringLiteral("巡检条带预览"),QStringLiteral("巡检覆盖统计"),QStringLiteral("整栋巡检预存路线")})displays_[name]->setEnabled(page_tabs_->currentIndex()==1);
+      if(page_tabs_->currentIndex()==1)showTopDown();
+    });
+    horizontal->addWidget(side_pages_);
     horizontal->setStretchFactor(0, 4);
     horizontal->setStretchFactor(1, 1);
     main->addWidget(horizontal, 1);
@@ -735,7 +998,11 @@ private:
 
   void trigger(ros::ServiceClient& client, const QString& name) {
     std_srvs::Trigger srv;
-    if (!client.call(srv)) log(name + QStringLiteral("服务不可用"));
+    const bool measured=timing_file_.is_open() && name==QStringLiteral("悬停");
+    if(measured){std::lock_guard<std::mutex> guard(mutex_);timing_hold_start_=steadySeconds();timing_hold_receipt_=0.;}
+    const bool delivered=client.call(srv);
+    if(measured){timing_hold_ack_ms_=1000.*(steadySeconds()-timing_hold_start_);timing_hold_ok_=delivered&&srv.response.success;}
+    if (!delivered) log(name + QStringLiteral("服务不可用"));
     else log(name + QStringLiteral(": ") + QString::fromStdString(srv.response.message));
   }
 
@@ -793,7 +1060,7 @@ private:
   void onOdom(const nav_msgs::Odometry::ConstPtr& msg) { std::lock_guard<std::mutex> guard(mutex_); odom_ = *msg; have_odom_ = true; }
   void onBattery(const sensor_msgs::BatteryState::ConstPtr& msg) { std::lock_guard<std::mutex> guard(mutex_); battery_ = *msg; battery_receipt_ = ros::WallTime::now(); battery_ros_receipt_ = ros::Time::now(); }
   void onLio(const std_msgs::Bool::ConstPtr& msg) { std::lock_guard<std::mutex> guard(mutex_); lio_valid_ = msg->data; lio_receipt_ = ros::WallTime::now(); lio_ros_receipt_ = ros::Time::now(); }
-  void onPhase(const std_msgs::String::ConstPtr& msg) { std::lock_guard<std::mutex> guard(mutex_); phase_ = msg->data; if (phase_ == "NAVIGATING") ++navigation_epoch_; }
+  void onPhase(const std_msgs::String::ConstPtr& msg) { std::lock_guard<std::mutex> guard(mutex_); phase_ = msg->data; if (phase_ == "NAVIGATING") ++navigation_epoch_; if(phase_=="HOLD"&&timing_hold_start_>0.&&timing_hold_receipt_==0.)timing_hold_receipt_=steadySeconds(); }
   void onAuth(const std_msgs::Bool::ConstPtr& msg) { std::lock_guard<std::mutex> guard(mutex_); authorized_ = msg->data; }
   void onError(const std_msgs::String::ConstPtr& msg) { std::lock_guard<std::mutex> guard(mutex_); pending_error_ = QString::fromStdString(msg->data); }
   void onFront(const sensor_msgs::Image::ConstPtr& msg) { onImage(msg, true); }
@@ -828,11 +1095,13 @@ private:
     bool alignmentReady=false,transformChanged=false;geometry_msgs::PoseStamped mapTransform;
     nav_msgs::Path queue;
     bool queueUpdate = false, ceilingUpdate = false;
-    double ceiling = 2.5;
+    double ceiling = 6.6;
+    double timingSource=0.,timingReceipt=0.,holdStart=0.,holdReceipt=0.;
     {
       std::lock_guard<std::mutex> guard(mutex_);
       mapMode=map_mode_;mapStatus=map_status_;sessionMode=map_session_mode_;sessionMessage=map_session_message_;alignmentReady=alignment_ready_;mapTransform=map_transform_;transformChanged=map_transform_changed_;map_transform_changed_=false;
       state = state_; battery = battery_; phase = phase_; odom = odom_;
+      timingSource=timing_source_;timingReceipt=timing_receipt_;holdStart=timing_hold_start_;holdReceipt=timing_hold_receipt_;
       front = front_; down = down_; frontStamp = front_stamp_; downStamp = down_stamp_;
       authorized = authorized_; lio = lio_valid_;
       lioQuality = lio_quality_;
@@ -926,10 +1195,27 @@ private:
     }
     goal_button_->setEnabled(alignmentReady && flightReady && authorized && state.armed &&
                             (phase == "HOLD" || phase == "NAVIGATING") && queued_points_.size() < 100);
+    refreshInspection(alignmentReady,flightReady,authorized,state.armed,phase,sessionMode);
+    refreshAi();
+    QJsonObject building;ros::WallTime buildingSeen;{std::lock_guard<std::mutex> guard(mutex_);building=building_snapshot_;buildingSeen=building_receipt_;}
+    const auto buildingState=building["state"].toString();const bool buildingFresh=(ros::WallTime::now()-buildingSeen).toSec()<2.;
+    building_label_->setText(QStringLiteral("%1 · 已通过任务段 %2/%3\n%4").arg(buildingState).arg(building["segment"].toInt()).arg(building["total_segments"].toInt()).arg(building["message"].toString()));
+    building_label_->setStyleSheet(buildingState=="PAUSED"?QStringLiteral("background:#765b19;"):buildingState=="DRAFT"?QStringLiteral("background:#7b2c36;"):QStringLiteral(""));
+    if(!buildingFresh)building_label_->setText(QStringLiteral("整栋巡检管理器失联，禁止开始新任务"));
+    if(building_buttons_.size()==6){
+      building_buttons_[0]->setEnabled(buildingFresh&&buildingState=="READY"&&sessionMode=="PRIOR_NAV"&&authorized&&flightReady);
+      building_buttons_[1]->setEnabled(buildingFresh&&buildingState!="READY"&&buildingState!="PAUSED"&&buildingState!="GENERATING");
+      building_buttons_[2]->setEnabled(buildingFresh&&buildingState=="PAUSED"&&flightReady&&phase=="HOLD");
+      building_buttons_[3]->setEnabled(buildingFresh);
+      building_buttons_[4]->setEnabled(buildingFresh&&!state.armed&&buildingState!="GENERATING");
+      building_buttons_[5]->setEnabled(buildingFresh&&!state.armed&&buildingState!="GENERATING");
+    }
     ceiling_button_->setEnabled(state.connected && managerFresh &&
                                (!state.armed || (flightReady && phase == "HOLD" && !goal_busy_)));
-    map_mode_label_->setText(QStringLiteral("%1\n%2").arg(mapMode=="PRIOR_NAV"?QStringLiteral("预建地图导航"):mapMode=="MAPPING"?QStringLiteral("在线建图导航"):QStringLiteral("地图模式等待中"),mapStatus));
-    map_mode_label_->setText(sessionMessage+QStringLiteral("\n")+(alignmentReady?QStringLiteral("地图坐标就绪"):QStringLiteral("初始位姿未确认，导航锁定")));
+    const QString modeTitle=(sessionMode=="PRIOR_NAV" || sessionMode=="WAITING_POSE" || sessionMode=="ALIGNING")
+        ?QStringLiteral("巡检模式 · 预建地图")
+        :sessionMode=="ONLINE"?QStringLiteral("建图模式 · 在线地图"):QStringLiteral("地图模式初始化中");
+    map_mode_label_->setText(modeTitle+QStringLiteral("\n")+(alignmentReady?QStringLiteral("地图坐标就绪"):QStringLiteral("等待初始化，导航锁定")));
     map_mode_label_->setToolTip(sessionMessage+QStringLiteral("\n")+mapStatus);
     const bool bootPending=sessionMode=="WAITING_POSE";
     const bool mapEditable=bootPending || (flightReady && !state.armed && phase=="READY" && lioQuality=="HEALTHY");
@@ -947,7 +1233,7 @@ private:
     land_button_->setEnabled(state.connected && state.armed);
     disarm_button_->setEnabled(state.connected && managerFresh && state.armed && phase == "ARMED");
     auth_button_->setText(authorized ? QStringLiteral("撤销授权") : QStringLiteral("操作授权"));
-    pick_button_->setEnabled(picking_goal_ || (goal_button_->isEnabled() && !click));
+    pick_button_->setEnabled(!inspection_reserved_ui_ && (picking_goal_ || (goal_button_->isEnabled() && !click)));
     pick_button_->setText(picking_goal_ ? QStringLiteral("结束连续点选") : QStringLiteral("点选XY目标"));
     if (click && picking_goal_) {
       if (!goal_button_->isEnabled()) {
@@ -1108,15 +1394,213 @@ private:
     setCardColor("雷达/EGO", cloudFresh && mapFresh ? CardColor::Green : CardColor::Red);
     setCardColor("双相机", frontFresh && downFresh ? CardColor::Green : CardColor::Red);
     setCardColor("告警", alarmActive ? CardColor::Red : CardColor::Green);
-    if (frontFresh && !front.isNull()) front_image_->setPixmap(QPixmap::fromImage(front).scaled(front_image_->contentsRect().size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    else front_image_->setText(QStringLiteral("前视画面等待中"));
-    if (downFresh && !down.isNull()) down_image_->setPixmap(QPixmap::fromImage(down).scaled(down_image_->contentsRect().size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    else down_image_->setText(QStringLiteral("下视画面等待中"));
+    for(auto* label:{front_image_,inspection_front_image_})if(label->isVisible()){
+      if(frontFresh&&!front.isNull())label->setPixmap(QPixmap::fromImage(front).scaled(label->contentsRect().size(),Qt::KeepAspectRatio,Qt::SmoothTransformation));
+      else label->setText(QStringLiteral("前视画面等待中"));
+    }
+    for(auto* label:{down_image_,inspection_down_image_})if(label->isVisible()){
+      if(downFresh&&!down.isNull())label->setPixmap(QPixmap::fromImage(down).scaled(label->contentsRect().size(),Qt::KeepAspectRatio,Qt::SmoothTransformation));
+      else label->setText(QStringLiteral("下视画面等待中"));
+    }
+    if(timing_file_.is_open()){
+      const double finished=steadySeconds();
+      if(timingSource>0.&&timingSource>timing_last_written_&&finished>=timingSource){
+        timing_file_ << "health," << ros::Time::now().toSec() << ',' << timingSource << ',' << timingReceipt << ',' << finished << ',' << 1000.*(timingReceipt-timingSource) << ',' << 1000.*(finished-timingSource) << ",,,1," << phase << ',' << state.armed << '\n';
+        timing_last_written_=timingSource;
+      }
+      if(holdStart>0.&&holdReceipt>=holdStart&&phase=="HOLD"){
+        timing_file_ << "hold," << ros::Time::now().toSec() << ',' << holdStart << ',' << holdReceipt << ',' << finished << ',' << 1000.*(holdReceipt-holdStart) << ',' << 1000.*(finished-holdStart) << ',' << timing_hold_ack_ms_ << ',' << 1000.*(holdReceipt-holdStart) << ',' << timing_hold_ok_ << ',' << phase << ',' << state.armed << '\n';
+        std::lock_guard<std::mutex> guard(mutex_);timing_hold_start_=0.;timing_hold_receipt_=0.;
+      }
+      timing_file_.flush();
+    }
+  }
+
+  template<class Service,class Done>
+  void asyncInspection(ros::ServiceClient client,Service service,Done done){
+    inspection_call_pending_=true;
+    auto* watcher=new QFutureWatcher<std::pair<bool,Service>>(this);
+    connect(watcher,&QFutureWatcher<std::pair<bool,Service>>::finished,this,[this,watcher,done]{
+      const auto result=watcher->result();inspection_call_pending_=false;done(result.first,result.second);watcher->deleteLater();
+    });
+    watcher->setFuture(QtConcurrent::run([client,service]() mutable {const bool ok=client.call(service);return std::make_pair(ok,service);}));
+  }
+
+  void refreshAi(){
+    const auto wall=ros::WallTime::now();
+    if(ai_last_heartbeat_.isZero()||(wall-ai_last_heartbeat_).toSec()>=.5){
+      QJsonObject pulse;pulse["session_id"]=QString::fromStdString(ai_session_id_);pulse["takeoff_height_m"]=takeoff_height_->value();
+      std_msgs::String m;m.data=QJsonDocument(pulse).toJson(QJsonDocument::Compact).toStdString();ai_heartbeat_pub_.publish(m);ai_last_heartbeat_=wall;
+    }
+    QJsonObject data;ros::WallTime receipt;QStringList events;
+    {std::lock_guard<std::mutex> guard(mutex_);data=ai_snapshot_;receipt=ai_receipt_;events.swap(ai_pending_events_);}
+    for(const auto& event:events)ai_event_view_->appendPlainText(QDateTime::currentDateTime().toString("HH:mm:ss ")+event);
+    const bool fresh=!receipt.isZero()&&(wall-receipt).toSec()<2.;
+    const bool mine=data["session_id"].toString()==QString::fromStdString(ai_session_id_);
+    const bool connected=data["client_sessions"].toArray().contains(QString::fromStdString(ai_session_id_));
+    const bool parse=mine&&data["parse_authorized"].toBool(),control=mine&&data["control_authorized"].toBool();
+    {QSignalBlocker a(ai_parse_gate_),b(ai_control_gate_);ai_parse_gate_->setChecked(parse);ai_control_gate_->setChecked(control);}
+    ai_parse_gate_->setEnabled(fresh&&connected&&data["configured"].toBool()&&!ai_call_pending_&&
+      (mine||(!data["parse_authorized"].toBool()&&!data["control_authorized"].toBool())));
+    ai_control_gate_->setEnabled(fresh&&parse&&!ai_call_pending_);
+    ai_submit_button_->setEnabled(fresh&&parse&&!data["busy"].toBool()&&!ai_call_pending_);
+    ai_cancel_button_->setEnabled(fresh&&mine&&!ai_call_pending_&&(data["busy"].toBool()||data["control_authorized"].toBool()));
+    const QString state=data["state"].toString(),error=data["error"].toString();
+    const std::map<QString,QString> labels={{"IDLE",QStringLiteral("待输入")},{"PARSING",QStringLiteral("云端解析中")},{"EXECUTING",QStringLiteral("等待实际执行结果")},
+      {"PARSED",QStringLiteral("仅解析，未执行")},{"NEEDS_INPUT",QStringLiteral("需补充指令信息")},{"SUCCEEDED",QStringLiteral("任务完成")},
+      {"COMPLETED_PARTIAL",QStringLiteral("部分完成")},{"CANCELED",QStringLiteral("已停止")},{"FAILED",QStringLiteral("任务失败")}};
+    const auto steps=data["steps"].toArray();
+    ai_status_label_->setText(fresh?QStringLiteral("%1 · 密钥%2\n云端解析：%3 / AI执行：%4\n%5 · 步骤 %6/%7\n%8")
+      .arg(data["model"].toString(),data["configured"].toBool()?QStringLiteral("已配置"):QStringLiteral("未配置"),parse?QStringLiteral("开启"):QStringLiteral("关闭"),control?QStringLiteral("开启"):QStringLiteral("关闭"),
+           labels.count(state)?labels.at(state):state).arg(std::max(0,data["step"].toInt()+1)).arg(steps.size()).arg(error):QStringLiteral("AI服务离线；授权与发送已禁用"));
+    ai_status_label_->setToolTip(error);
+    ai_status_label_->setStyleSheet(QStringLiteral("QLabel{background:%1;padding:5px;border-radius:4px;color:#152020;}")
+      .arg(!fresh||!error.isEmpty()||state=="FAILED"?"#ef7777":state=="SUCCEEDED"||state=="IDLE"?"#77cb8a":"#efcf68"));
+    QStringList names;for(const auto& item:known_records_)names<<item.toObject()["name"].toString();
+    ai_regions_label_->setText(QStringLiteral("当前地图已知区域：")+(names.isEmpty()?QStringLiteral("无，请到区域巡检页保存区域"):names.join(QStringLiteral("、"))));
+    QString reply=data["answer"].toString()+QStringLiteral("\n\n完整计划：\n");
+    for(int i=0;i<steps.size();++i){const auto step=steps[i].toObject();reply+=QStringLiteral("%1. %2 [%3] %4\n").arg(i+1).arg(step["description"].toString(),step["tool"].toString(),QString::fromUtf8(QJsonDocument(step["arguments"].toObject()).toJson(QJsonDocument::Compact)));}
+    if(reply!=ai_reply_->toPlainText())ai_reply_->setPlainText(reply);
+  }
+
+  void requestKnownRegions(const std::string& action){
+    if(known_map_digest_.isEmpty()){log(QStringLiteral("预建地图标识尚未就绪"));return;}
+    QJsonObject data;data["map_digest"]=known_map_digest_;
+    const QString selected=known_regions_->currentData().toString();
+    if(action=="delete"||action=="update")data["id"]=selected;
+    if(action=="save"||action=="update"){
+      if(inspection_polygon_.size()<3||known_name_->text().trimmed().isEmpty()){log(QStringLiteral("请先选区并输入区域名称"));return;}
+      QJsonArray polygon;for(auto point:inspection_polygon_)polygon.append(QJsonArray{point.first,point.second});
+      data["name"]=known_name_->text().trimmed();data["polygon"]=polygon;data["altitude"]=inspection_height_->value();
+      data["spacing"]=inspection_spacing_->value();data["overlap"]=inspection_overlap_->value();data["speed"]=inspection_speed_->value();
+      data["auto_spacing"]=inspection_auto_spacing_->isChecked();data["angle_deg"]=inspection_auto_angle_->isChecked()?-1.:inspection_angle_->value();data["entry"]=inspection_entry_->currentIndex();
+    }
+    drone_stack::InspectionRegions service;service.request.action=action;
+    service.request.payload=QJsonDocument(data).toJson(QJsonDocument::Compact).toStdString();
+    const QString expected=known_map_digest_,name=data["name"].toString();
+    asyncInspection(inspection_regions_client_,service,[this,expected,selected,name,action](bool ok,const drone_stack::InspectionRegions& result){
+      if(expected!=known_map_digest_)return;
+      if(!ok||!result.response.success){log(ok?QString::fromStdString(result.response.message):QStringLiteral("已知区域服务不可用"));return;}
+      const auto payload=QJsonDocument::fromJson(QByteArray::fromStdString(result.response.payload)).object();
+      if(payload["map_digest"].toString()!=known_map_digest_)return;
+      known_records_=payload["regions"].toArray();known_regions_->clear();known_regions_->addItem(QStringLiteral("请选择已知区域（%1个）").arg(known_records_.size()));
+      int choose=0;
+      for(const auto& item:known_records_){const auto r=item.toObject();const QString id=r["id"].toString();
+        known_regions_->addItem(r["name"].toString(),id);const int index=known_regions_->count()-1;
+        known_regions_->setItemData(index,QStringLiteral("地图Z %1m / 间距 %2m / 速度 %3m/s").arg(r["altitude"].toDouble()).arg(r["spacing"].toDouble()).arg(r["speed"].toDouble()),Qt::ToolTipRole);
+        if((action=="save"&&r["name"].toString()==name)||(action!="save"&&action!="delete"&&id==selected))choose=index;
+      }
+      known_regions_->setCurrentIndex(choose);log(QString::fromStdString(result.response.message));
+    });
+  }
+
+  void loadKnownRegion(){
+    const QString id=known_regions_->currentData().toString();
+    for(const auto& item:known_records_){const auto r=item.toObject();if(r["id"].toString()!=id)continue;
+      const double height=r["altitude"].toDouble();
+      if(height<inspection_height_->minimum()||height>inspection_height_->maximum()){log(QStringLiteral("已知区域高度超出当前天花板/导航范围，请调整后再加载"));return;}
+      inspection_polygon_.clear();for(const auto& point:r["polygon"].toArray()){const auto a=point.toArray();inspection_polygon_.push_back({a[0].toDouble(),a[1].toDouble()});}
+      inspection_height_->setValue(height);inspection_spacing_->setValue(r["spacing"].toDouble());inspection_overlap_->setValue(r["overlap"].toDouble());
+      inspection_speed_->setValue(r["speed"].toDouble());inspection_auto_spacing_->setChecked(r["auto_spacing"].toBool());
+      const double angle=r["angle_deg"].toDouble();inspection_auto_angle_->setChecked(angle<0);inspection_angle_->setValue(std::max(0.,angle));
+      inspection_entry_->setCurrentIndex(r["entry"].toInt());known_name_->setText(r["name"].toString());
+      inspection_picking_=0;picking_goal_=false;inspection_dirty_=true;inspection_plan_id_.clear();showTopDown();publishInspectionDraft();
+      log(QStringLiteral("已加载区域“%1”，请重新生成巡检路线；未开始飞行。").arg(r["name"].toString()));return;
+    }
+    log(QStringLiteral("请选择已知区域"));
+  }
+
+  void publishInspectionDraft(){
+    visualization_msgs::MarkerArray array;visualization_msgs::Marker m;
+    m.header.frame_id="map";m.header.stamp=ros::Time::now();m.ns="inspection_draft";m.id=0;
+    m.type=visualization_msgs::Marker::LINE_STRIP;m.action=inspection_polygon_.empty()?visualization_msgs::Marker::DELETE:visualization_msgs::Marker::ADD;
+    m.pose.orientation.w=1.;m.scale.x=.04;m.color.g=1.;m.color.b=1.;m.color.a=1.;
+    for(auto p:inspection_polygon_){geometry_msgs::Point v;v.x=p.first;v.y=p.second;v.z=inspection_height_->value();m.points.push_back(v);}
+    if(!inspection_picking_ && m.points.size()>=3)m.points.push_back(m.points.front());
+    array.markers.push_back(m);inspection_draft_pub_.publish(array);
+  }
+
+  void refreshInspection(bool aligned,bool healthy,bool authorized,bool armed,const std::string& phase,const QString& mapMode){
+    QJsonObject snapshot;ros::WallTime receipt;
+    {std::lock_guard<std::mutex> guard(mutex_);snapshot=inspection_snapshot_;receipt=inspection_receipt_;}
+    const bool fresh=!receipt.isZero()&&(ros::WallTime::now()-receipt).toSec()<2.;
+    const QString state=snapshot["state"].toString();
+    const bool active=state=="TRANSITING"||state=="SCANNING"||state=="TURNING"||state=="REPLANNING";
+    const bool reserved=active||state=="PAUSED";
+    inspection_reserved_ui_=reserved;
+    const bool editable=fresh&&aligned&&mapMode=="PRIOR_NAV"&&!reserved&&state!="PLANNING"&&!inspection_call_pending_;
+    if(!editable)inspection_picking_=0;
+    for(auto* button:inspection_edit_buttons_)button->setEnabled(editable);
+    inspection_plan_button_->setEnabled(editable&&inspection_polygon_.size()>=3);
+    inspection_spacing_->setEnabled(editable&&!inspection_auto_spacing_->isChecked());
+    inspection_overlap_->setEnabled(editable&&inspection_auto_spacing_->isChecked());
+    inspection_speed_->setEnabled(editable);inspection_angle_->setEnabled(editable&&!inspection_auto_angle_->isChecked());
+    inspection_height_->setRange(clicked_height_->minimum(),clicked_height_->maximum());inspection_height_->setEnabled(editable);
+    inspection_auto_angle_->setEnabled(editable);inspection_auto_spacing_->setEnabled(editable);inspection_entry_->setEnabled(editable);
+    const bool flying=fresh&&aligned&&healthy&&authorized&&armed&&phase=="HOLD"&&mapMode=="PRIOR_NAV";
+    inspection_start_button_->setEnabled(flying&&state=="READY"&&!inspection_dirty_&&!inspection_call_pending_);
+    inspection_resume_button_->setEnabled(flying&&state=="PAUSED"&&!inspection_call_pending_);
+    inspection_pause_button_->setEnabled(fresh&&active&&!inspection_call_pending_);
+    inspection_cancel_button_->setEnabled(fresh&&state!="IDLE"&&state!="CANCELED"&&!inspection_call_pending_);
+    const QString digest=snapshot["map_digest"].toString();
+    if(digest!=known_map_digest_){
+      if(!known_map_digest_.isEmpty()){
+        inspection_polygon_.clear();inspection_plan_id_.clear();inspection_dirty_=true;inspection_picking_=0;known_name_->clear();publishInspectionDraft();
+      }
+      known_map_digest_=digest;known_records_=QJsonArray();known_regions_->clear();known_regions_->addItem(QStringLiteral("请选择已知区域"));known_loaded_digest_.clear();
+    }
+    const bool library=editable&&!digest.isEmpty();
+    known_regions_->setEnabled(library);known_name_->setEnabled(library);
+    known_refresh_->setEnabled(library);known_load_->setEnabled(library&&!known_regions_->currentData().toString().isEmpty());
+    known_save_->setEnabled(library&&inspection_polygon_.size()>=3);
+    known_update_->setEnabled(library&&inspection_polygon_.size()>=3&&!known_regions_->currentData().toString().isEmpty());
+    known_delete_->setEnabled(library&&!known_regions_->currentData().toString().isEmpty());
+    if(library&&snapshot["available"].toBool()&&known_loaded_digest_!=digest){known_loaded_digest_=digest;requestKnownRegions("list");}
+    if(reserved){goal_button_->setEnabled(false);pick_button_->setEnabled(false);picking_goal_=false;}
+    const std::map<QString,QString> names={{"IDLE",QStringLiteral("待选区")},{"PLANNING",QStringLiteral("生成路线中")},{"READY",QStringLiteral("预览就绪")},
+      {"TRANSITING",QStringLiteral("入口/转场导航")},{"SCANNING",QStringLiteral("扫描中")},{"TURNING",QStringLiteral("换行/转向")},
+      {"REPLANNING",QStringLiteral("重新连接路线")},{"PAUSED",QStringLiteral("已暂停")},{"COMPLETED",QStringLiteral("完成")},
+      {"COMPLETED_PARTIAL",QStringLiteral("部分完成")},{"FAILED",QStringLiteral("失败")},{"CANCELED",QStringLiteral("已取消")}};
+    const auto metrics=snapshot["metrics"].toObject();
+    inspection_status_->setText(fresh?QStringLiteral("%1 · %2条扫描线\n间距 %3m / 方向 %4° / 入口%5\n覆盖 %6%（%7/%8 m²）%9")
+      .arg(names.count(state)?names.at(state):state).arg(snapshot["lines"].toInt()).arg(snapshot["spacing"].toDouble(),0,'f',2)
+      .arg(snapshot["selected_angle"].toDouble(),0,'f',0).arg(snapshot["selected_entry"].toInt())
+      .arg(metrics["ratio"].toDouble()*100.,0,'f',1).arg(metrics["covered_m2"].toDouble(),0,'f',2).arg(metrics["eligible_m2"].toDouble(),0,'f',2)
+      .arg(inspection_dirty_&&state=="READY"?QStringLiteral("\n参数已改，请重新生成"):QString()):QStringLiteral("巡检管理器离线或数据过期"));
+    inspection_status_->setToolTip(QStringLiteral("记录目录：")+snapshot["record_dir"].toString());
+    QStringList alerts,eventKeys,diagnostics;bool red=false;
+    for(const auto& item:snapshot["issues"].toArray()){
+      const auto issue=item.toObject();red|=issue["level"].toString()=="ERROR";
+      eventKeys<<issue["code"].toString()+issue["level"].toString()+issue["reason"].toString()+issue["action"].toString();
+      if(!issue["detail"].toString().isEmpty())diagnostics<<issue["code"].toString()+": "+issue["detail"].toString();
+      alerts<<QStringLiteral("[%1 · %2s · %3次] %4\n%5").arg(issue["code"].toString())
+        .arg(issue["first_time"].toDouble(),0,'f',1).arg(issue["count"].toInt())
+        .arg(issue["reason"].toString(),issue["action"].toString());
+    }
+    if(!fresh)alerts.prepend(QStringLiteral("巡检管理器离线；禁止开始或恢复，请查看节点日志"));
+    else if(!snapshot["available"].toBool())alerts.prepend(QStringLiteral("巡检需要已加载并对齐的预建地图"));
+    const QString alarm=alerts.join(QStringLiteral("\n"));
+    const QString eventKey=alerts.isEmpty()?QString():eventKeys.join("|")+QString::number(fresh)+QString::number(snapshot["available"].toBool());
+    inspection_alarm_->setText(alarm.isEmpty()?QStringLiteral("无巡检异常"):alarm);
+    inspection_alarm_->setToolTip(alarm+QStringLiteral("\n")+diagnostics.join(QStringLiteral("\n")));
+    inspection_alarm_->setStyleSheet(QStringLiteral("QLabel{background:%1;color:#152020;border-radius:4px;padding:4px;}")
+      .arg(red?"#ef7777":alerts.isEmpty()?"#77cb8a":"#efcf68"));
+    if(eventKey!=inspection_last_alarm_){
+      if(!alarm.isEmpty())log(QStringLiteral("巡检：")+alarm);
+      else if(!inspection_last_alarm_.isEmpty())log(QStringLiteral("巡检异常已恢复；历史记录保留"));
+      inspection_last_alarm_=eventKey;
+    }
   }
 
   void log(const QString& text) { if (events_) events_->appendPlainText(QDateTime::currentDateTime().toString("HH:mm:ss ") + text); }
 
   ros::NodeHandle nh_;
+  std::ofstream timing_file_;
+  QString timing_snapshot_path_;
+  ros::Subscriber timing_command_sub_;
+  double timing_source_=0.,timing_receipt_=0.,timing_last_written_=0.;
+  double timing_hold_start_=0.,timing_hold_receipt_=0.,timing_hold_ack_ms_=0.;
+  bool timing_hold_ok_=false;
   ros::Publisher navigation_pub_, active_goal_pub_;
   ros::Subscriber global_marker_sub_, local_path_sub_;
   ros::Subscriber global_path_sub_, global_status_sub_, lio_quality_sub_, navigation_wait_sub_;
@@ -1135,6 +1619,9 @@ private:
   QPushButton* initial_pose_button_=nullptr;
   QPushButton* initial_confirm_button_=nullptr;
   ros::Subscriber map_mode_sub_,map_status_sub_;
+  ros::ServiceClient building_client_;ros::Subscriber building_sub_;ros::Publisher floor_pub_;
+  QJsonObject building_snapshot_;ros::WallTime building_receipt_;QLabel* building_label_=nullptr;
+  std::vector<QPushButton*> building_buttons_;
   QString map_mode_,map_status_;
   QLabel* map_mode_label_=nullptr;
   QLineEdit* map_file_=nullptr;
@@ -1145,7 +1632,7 @@ private:
   ros::Subscriber queue_sub_, ceiling_sub_;
   nav_msgs::Path queue_message_;
   bool have_queue_update_ = false, have_ceiling_update_ = false;
-  double ceiling_value_ = 2.5;
+  double ceiling_value_ = 6.6;
   std::vector<geometry_msgs::Point> queued_points_;
   size_t rendered_queue_count_ = 0;
   QLabel* queue_status_ = nullptr;
@@ -1160,6 +1647,37 @@ private:
   std::string phase_;
   QString pending_error_;
   QString last_error_;
+  ros::ServiceClient inspection_plan_client_,inspection_command_client_;
+  ros::ServiceClient inspection_regions_client_;
+  ros::ServiceClient ai_text_client_,ai_gate_client_,ai_cancel_client_;
+  ros::Subscriber ai_status_sub_,ai_events_sub_;ros::Publisher ai_heartbeat_pub_;
+  std::string ai_session_id_;QJsonObject ai_snapshot_;QStringList ai_pending_events_;
+  ros::WallTime ai_receipt_,ai_last_heartbeat_;bool ai_call_pending_=false;
+  QCheckBox *ai_parse_gate_=nullptr,*ai_control_gate_=nullptr;
+  QPushButton *ai_submit_button_=nullptr,*ai_cancel_button_=nullptr;
+  QLabel *ai_status_label_=nullptr,*ai_regions_label_=nullptr;
+  QPlainTextEdit *ai_input_=nullptr,*ai_reply_=nullptr,*ai_event_view_=nullptr;
+  QTabBar* page_tabs_=nullptr;QStackedWidget* side_pages_=nullptr;
+  QList<int> saved_split_sizes_;
+  QLabel *inspection_front_image_=nullptr,*inspection_down_image_=nullptr;
+  QDoubleSpinBox* inspection_height_=nullptr;
+  QComboBox* known_regions_=nullptr;QLineEdit* known_name_=nullptr;
+  QPushButton *known_load_=nullptr,*known_refresh_=nullptr,*known_save_=nullptr,*known_update_=nullptr,*known_delete_=nullptr;
+  QJsonArray known_records_;QString known_map_digest_,known_loaded_digest_;
+  ros::Subscriber inspection_sub_;
+  ros::Publisher inspection_draft_pub_;
+  QJsonObject inspection_snapshot_;ros::WallTime inspection_receipt_;
+  QLabel *inspection_status_=nullptr,*inspection_alarm_=nullptr;
+  QDoubleSpinBox *inspection_spacing_=nullptr,*inspection_overlap_=nullptr,*inspection_speed_=nullptr,*inspection_angle_=nullptr;
+  QCheckBox *inspection_auto_spacing_=nullptr,*inspection_auto_angle_=nullptr;
+  QComboBox* inspection_entry_=nullptr;
+  QPushButton *inspection_plan_button_=nullptr,*inspection_start_button_=nullptr,*inspection_pause_button_=nullptr,
+      *inspection_resume_button_=nullptr,*inspection_cancel_button_=nullptr;
+  std::vector<QPushButton*> inspection_edit_buttons_;
+  std::vector<std::pair<double,double>> inspection_polygon_;
+  Ogre::Vector3 inspection_drag_start_;
+  int inspection_picking_=0;bool inspection_dirty_=true,inspection_call_pending_=false,inspection_reserved_ui_=false;
+  std::string inspection_plan_id_;QString inspection_last_alarm_;
   QImage front_, down_;
   bool two_d_view_ = false, goal_busy_ = false, navigation_seen_ = false, have_target_marker_ = false, have_global_path_ = false;
   ros::Time goal_start_, last_trace_stamp_;

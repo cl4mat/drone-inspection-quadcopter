@@ -1,0 +1,2 @@
+group,lateral,ok,code,reason,min_clearance,max_deviation_from_line,deviation_after_box,space_wait_samples,perception_hits,final_goal_error,arrival_state,trigger_distance,wall_seconds
+group_01,-1.5,False,F7_INFRASTRUCTURE,type object got multiple values for keyword argument 'sim',,,,,,,,,1025.7

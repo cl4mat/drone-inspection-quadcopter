@@ -1,0 +1,7 @@
+{
+  "reason": "Repeated EGO continuous local curve safety-margin violation, no executable trajectory after ~50 sim seconds. User requested faster completion; end exposure as failed without changing goal or deleting obstacle first.",
+  "sim": 0.0,
+  "wall": 1791702553.6759331,
+  "success": true,
+  "message": "Current position held; previous trajectory ignored"
+}

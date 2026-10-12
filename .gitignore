@@ -34,3 +34,21 @@ Thumbs.db
 /start/cleanup_records/
 
 /start/maps/
+/start/inspection_records/
+/start/inspection_regions/
+
+# Building task artifacts are tied to local measured maps.
+start/maps/*.topology.json
+start/maps/*.inspection.json
+start/maps/*.mission_progress.json*
+
+# Local experiment markers and private model credentials
+/start/ACTIVE_PATROL_EXPERIMENT
+/start/private/
+
+# Raw experiment artifacts are kept outside source control
+/reports/**/stack_logs/
+/reports/**/*.bag
+/reports/**/*.bag.active
+/reports/**/*.log
+/reports/**/*.jsonl

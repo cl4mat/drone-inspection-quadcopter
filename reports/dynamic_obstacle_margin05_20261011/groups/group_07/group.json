@@ -1,0 +1,141 @@
+{
+  "arrival_state": "HOLD",
+  "avoidance_manoeuvre": false,
+  "code": "F4_GOAL_LOST",
+  "deviation_after_box": null,
+  "events": [
+    {
+      "event": "ready_airborne",
+      "sim": 121.938,
+      "wall": 1791702297.941
+    },
+    {
+      "event": "goal_issued",
+      "goal_odom": [
+        -0.25,
+        0.079,
+        0.999
+      ],
+      "goal_world": [
+        0.018,
+        0.083,
+        1.302
+      ],
+      "sim": 121.938,
+      "start_world": [
+        4.218,
+        1.584,
+        1.302
+      ],
+      "wall": 1791702297.957
+    },
+    {
+      "centre": [
+        1.869,
+        0.735,
+        0.9
+      ],
+      "event": "spawn",
+      "late": false,
+      "sim": 124.54,
+      "trigger_distance": 2.229,
+      "wall": 1791702309.727
+    },
+    {
+      "event": "spawn_confirmed",
+      "sim": 124.542,
+      "wall": 1791702309.728
+    },
+    {
+      "count": 720,
+      "event": "perceived",
+      "sim": 124.74,
+      "voxel": [
+        1.75,
+        0.65,
+        1.45
+      ],
+      "wall": 1791702310.431
+    },
+    {
+      "error": "navigation canceled after obstacle exposure: No collision-free local trajectory available yet; hovering, goal retained, waiting for scans/replan",
+      "event": "trial_timeout",
+      "sim": 180.558,
+      "wall": 1791702554.705
+    },
+    {
+      "event": "hovering_between_groups",
+      "sim": 180.558,
+      "wall": 1791702554.725
+    }
+  ],
+  "final_goal_error": 4.0738,
+  "frame_residual": 0.0767,
+  "goal_unchanged": true,
+  "injection": {
+    "centre": [
+      1.8692279476414178,
+      0.7354565772373134,
+      0.9
+    ],
+    "late": false,
+    "trigger_distance": 2.2289425342238594
+  },
+  "max_deviation_from_line": 0.2385,
+  "max_lateral_deviation_m": 0.087,
+  "min_clearance": 1.2374,
+  "mode": "experiment",
+  "ok": false,
+  "perception_hits": 720,
+  "protocol": "continuous shared flight",
+  "reached_completed": false,
+  "reason": "did not complete (terminal IDLE)",
+  "return_progress": null,
+  "returned_to_route": false,
+  "route_return_window": 0,
+  "samples": 2438,
+  "space_wait_samples": 723,
+  "space_wait_seen": true,
+  "voxels": {
+    "added": 178601,
+    "age": {
+      "bins": [
+        1362,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "count": 1362,
+      "max": 0.13,
+      "max_gap": 0.2,
+      "mean": 0.097
+    },
+    "epoch": 1791701886760507434,
+    "messages": 1362,
+    "origin": [
+      -32.0,
+      -24.0,
+      -4.5
+    ],
+    "resolution": 0.1,
+    "revision": 1533,
+    "shape": [
+      640,
+      480,
+      120
+    ],
+    "stamp": 180.468
+  },
+  "wait_error": "navigation canceled after obstacle exposure: No collision-free local trajectory available yet; hovering, goal retained, waiting for scans/replan",
+  "wall_seconds": 256.9,
+  "whole_airframe_envelope_radius_m": 0.4
+}

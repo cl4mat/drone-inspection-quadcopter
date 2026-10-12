@@ -1,0 +1,11 @@
+group,lateral,ok,code,reason,min_clearance,max_deviation_from_line,deviation_after_box,space_wait_samples,perception_hits,final_goal_error,arrival_state,trigger_distance,collision_free,goal_completed,returned_to_route,wall_seconds
+group_01,-1.5,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.1306,1.1353,0.3307,132,720,0.0222,HOLD,,True,True,True,400.2
+group_02,0.0,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.1235,1.107,0.3221,236,720,0.0594,HOLD,,True,True,True,410.0
+group_03,1.5,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.1211,1.2874,0.3448,222,720,0.0593,HOLD,,True,True,True,409.0
+group_04,-1.5,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.2767,1.8846,0.331,244,720,0.0616,HOLD,,True,True,True,429.1
+group_05,0.0,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.0881,1.0748,0.343,113,720,0.0676,HOLD,,True,True,True,449.2
+group_06,1.5,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.1114,1.168,0.3185,189,720,0.0603,HOLD,,True,True,True,179.2
+group_07,-1.5,False,F4_GOAL_LOST,did not complete (terminal IDLE),1.2374,0.2385,,723,720,4.0738,HOLD,,True,False,False,256.9
+group_08,0.045709638560190724,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.1051,1.057,0.3262,98,720,0.0856,HOLD,,True,True,True,118.0
+group_09,1.5146325979679822,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.0776,1.0957,0.3472,111,720,0.0978,HOLD,,True,True,True,128.9
+group_10,-1.4225001051723958,True,SUCCESS,"perceived, avoided, returned to route, reached the original goal",0.0828,1.0628,0.3321,117,720,0.1061,HOLD,,True,True,True,124.4

@@ -1,0 +1,66 @@
+{
+  "map_path": "$PROJECT_ROOT/start/maps/inspection_building.dmap",
+  "map_digest": "51d13dfd3f6730e4a070c7c689188f144070d6d8bf231b489b28d1870cdca1f0",
+  "sample_sim_hz": 5.0,
+  "world_from_map_translation": [
+    0.0,
+    0.0,
+    0.17
+  ],
+  "world_from_map_yaw": 0.0,
+  "lio_alignment": "fixed SE(3) from first synchronized ground sample",
+  "ground_truth_topic": "/gazebo/model_states",
+  "ground_truth_timestamp": "ROS clock at callback; acquisition timestamp unavailable in ModelStates",
+  "coverage": "actual down-camera geometric floor visibility; separately nominal configured swath",
+  "strip_spacing_m": 1.8,
+  "hall_height_above_floor_m": 1.6,
+  "hall_inset_m": 1.2,
+  "simulation_aggressive": true,
+  "obstacles_inflation_m": 0.2,
+  "health_hold_s": 3.0,
+  "health_land_s": 8.0,
+  "progress_timeout_s": 90.0,
+  "corridor_height_above_floor_m": 1.2,
+  "camera_pose_body": [
+    0.0,
+    0.0,
+    -0.15,
+    0.0,
+    1.5707963267948966,
+    0.0
+  ],
+  "camera_horizontal_fov_rad": 1.3962634,
+  "camera_width": 640,
+  "camera_height": 480,
+  "simulation_lio_min_support": 5.0,
+  "created_wall": 1791535598.1633532,
+  "world_file": "$PROJECT_ROOT/src/drone_stack/worlds/inspection_building.world",
+  "lio_world_rotation": [
+    [
+      0.9999966181069355,
+      0.0009436277117142141,
+      0.002423497768435025
+    ],
+    [
+      -0.0009413484149441651,
+      0.9999991137508032,
+      -0.000941467349412389
+    ],
+    [
+      -0.0024243840152926538,
+      0.0009391828096875528,
+      0.9999966201431865
+    ]
+  ],
+  "lio_world_translation": [
+    0.2700959988463767,
+    0.001983227556371203,
+    0.2663073813775139
+  ],
+  "mission_completed": true,
+  "finished_wall": 1791542780.2162344,
+  "final_phase": "READY",
+  "final_health": "HEALTHY",
+  "final_armed": false,
+  "final_landed_state": 1
+}

@@ -34,6 +34,7 @@
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-requests</exec_depend>
   <exec_depend>ego_planner</exec_depend>
   <depend>plan_env</depend>
   <depend>livox_ros_driver2</depend>

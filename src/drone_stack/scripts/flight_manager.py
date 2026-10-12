@@ -25,6 +25,10 @@ from ego_planner.msg import Bspline, DataDisp, GlobalRoute
 from ego_planner.srv import StartPlanning, StartPlanningRequest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from trajectory_guard import validate_curve, PackedCells, curve_geometry
+from drone_stack.srv import ExecuteInspectionRoute, ExecuteInspectionRouteResponse
+from drone_stack.srv import (ExecuteAiGoal,ExecuteAiGoalResponse,CancelNavigation,CancelNavigationResponse,
+    ExecuteAiAction,ExecuteAiActionResponse,TakeoffRequest)
+from ego_planner.msg import GlobalRoute
 from voxel_map_client import VoxelMapClient
 from std_msgs.msg import Bool, String, Header, Float64, Float64MultiArray
 from std_srvs.srv import SetBool, SetBoolResponse, Trigger, TriggerResponse
@@ -38,7 +42,9 @@ class FlightManager:
         self.lock = threading.RLock()
         self.planner_condition = threading.Condition(self.lock)
         self.planner_job = None
-        self.planner_serial = 0
+        # uint64 epochs survive a manager restart while EGO keeps its session.
+        # Store as a string because ROS XML-RPC integers are only 32 bits.
+        self.planner_serial = max(int(rospy.get_param('/drone/planner_generation_last','0')),time.time_ns())
         self.planner_ack_wall = 0.0
         self.first_session_curve = False
         self.navigation_wait_reason = ''
@@ -88,6 +94,22 @@ class FlightManager:
         self.active_goal = None
         self.route_sequence = 0
         self.global_route = None
+        self.inspection_task = 0
+        self.inspection_reserved = False
+        self.building_reserved = False
+        self.inspection_owner = ''
+        self.building_heartbeat = rospy.Time(0)
+        self.building_flight_owned = False
+        self.building_status_state = ''
+        self.building_status_task_id = 0
+        self.inspection_continuous = False
+        self.inspection_revision = 0
+        self.inspection_heartbeat=rospy.Time(0)
+        self.ai_session='';self.ai_control=False;self.ai_seen_wall=0.;self.ai_instance='';self.ai_counter=-1
+        self.ai_navigation_id=0;self.ai_navigation_session='';self.ai_flight_owned='';self.ai_flight_session='';self.ai_expiry_reported=False
+        self.ai_task_canceled=False
+        self.ai_request_id='';self.ai_task_active=False;self.ai_navigation_request='';self.ai_flight_request=''
+        self.inspection_route_pub = rospy.Publisher('/drone/inspection_route', GlobalRoute, queue_size=1, latch=True)
         self.next_navigation_speed = 0.5
         self.active_navigation_speed = 0.5
         self.goal_configuration_busy = False
@@ -127,7 +149,8 @@ class FlightManager:
             raise ValueError('Arrival exit tolerance must exceed final tolerance and be at most 0.30 m')
         self.goal_min = rospy.get_param('~goal_min_xyz', [-8.0, -8.0, 0.5])
         self.goal_max = rospy.get_param('~goal_max_xyz', [8.0, 8.0, 2.5])
-        self.configured_max_height = self.goal_max[2]
+        self.map_z_offset=0.
+        self.configured_max_height = float(rospy.get_param('/drone/configured_max_height_m',6.6))
         self.ceiling_margin = .20
         self.max_flight_height = float(rospy.get_param('/drone/max_flight_height_m', self.configured_max_height))
         if not .8 <= self.max_flight_height <= self.configured_max_height:
@@ -151,12 +174,15 @@ class FlightManager:
         self.free_time = rospy.Time(0)
         self.max_map_age = rospy.get_param('~max_map_age_s', 2.0)
         self.max_setpoint_step = rospy.get_param('~max_setpoint_step_m', 0.75)
-        self.max_command_speed = rospy.get_param('~max_command_speed_mps', 1.5)
+        self.max_navigation_speed=float(rospy.get_param('/drone/max_navigation_speed_mps',2.))
+        self.max_command_speed = rospy.get_param('~max_command_speed_mps', 1.2*self.max_navigation_speed)
         self.prime_start = rospy.Time(0)
         self.arm_start = rospy.Time(0)
         self.rotate_start = None
         self.rotate_yaw_start = 0.0
         self.rotate_rate = math.radians(10.0)
+        self.rotate_total_angle=2*math.pi
+        self.rotate_direction=1.
         self.hold_pose = None
         self.takeoff_pose = None
         self.takeoff_start = rospy.Time(0)
@@ -200,6 +226,7 @@ class FlightManager:
             if rospy.get_param('~record_heartbeat_diagnostics',False) else None)
         rospy.Subscriber('/mavros/state', State, self.on_state, queue_size=10)
         rospy.Subscriber('/mavros/extended_state', ExtendedState, self.on_extended, queue_size=10)
+        rospy.Subscriber('/drone/map_transform',PoseStamped,self.on_map_bounds,queue_size=1)
         rospy.Subscriber('/drone/map_mode', String, lambda m: setattr(self,'navigation_map_mode',m.data), queue_size=1)
         rospy.Subscriber('/drone/map_alignment_ready', Bool, lambda m: setattr(self, 'map_alignment_ready', m.data), queue_size=1)
         rospy.Subscriber('/mavros/local_position/odom', Odometry, self.on_odom, queue_size=1, tcp_nodelay=True)
@@ -219,8 +246,22 @@ class FlightManager:
         rospy.Service('/drone/cancel_goal', Trigger, self.hold)
         rospy.Service('/drone/land', Trigger, self.land)
         rospy.Service('/drone/rotate_once', Trigger, self.rotate_once)
+        from drone_stack.srv import RotateHeading
+        rospy.Service('/drone/rotate_heading',RotateHeading,self.rotate_heading)
         rospy.Service('/drone/local_goal', LocalGoal, self.local_goal)
         rospy.Service('/drone/queue_goal', QueueGoal, self.queue_goal)
+        rospy.Service('/drone/execute_inspection_route', ExecuteInspectionRoute, self.execute_inspection_route)
+        from drone_stack.srv import BuildingFlightAction
+        rospy.Service('/drone/building/flight_action',BuildingFlightAction,self.building_flight_action)
+        rospy.Service('/drone/building/local_goal',LocalGoal,self.building_local_goal)
+        rospy.Subscriber('/drone/building/exclusive',Bool,lambda m:setattr(self,'building_reserved',m.data),queue_size=1)
+        rospy.Subscriber('/drone/building/status',String,self.on_building_status,queue_size=1)
+        rospy.Subscriber('/drone/inspection/exclusive',Bool,lambda m:setattr(self,'inspection_reserved',m.data),queue_size=1)
+        rospy.Subscriber('/drone/inspection/status',String,self.on_inspection_status,queue_size=1,tcp_nodelay=True)
+        rospy.Subscriber('/drone/ai/status',String,self.on_ai_status,queue_size=1,tcp_nodelay=True)
+        rospy.Service('/drone/execute_ai_goal',ExecuteAiGoal,self.execute_ai_goal)
+        rospy.Service('/drone/cancel_navigation',CancelNavigation,self.cancel_navigation)
+        rospy.Service('/drone/execute_ai_action',ExecuteAiAction,self.execute_ai_action)
         rospy.Service('/drone/set_max_flight_height', SetMaxFlightHeight, self.set_max_flight_height)
         rospy.Service('/drone/set_navigation_speed', SetNavigationSpeed, self.set_navigation_speed)
         self.planner_client = rospy.ServiceProxy('/planning/start', StartPlanning)
@@ -294,6 +335,8 @@ class FlightManager:
                 serial, generation, goal, speed = self.planner_job
                 self.planner_job = None
             req=StartPlanningRequest(enabled=goal is not None, speed_mps=speed, generation=serial)
+            req.inspection=bool(self.inspection_task)
+            req.continuous=self.inspection_continuous
             if goal is not None:
                 req.goal=goal
                 # The global route is authoritative for both display and EGO.
@@ -308,8 +351,12 @@ class FlightManager:
                         self.wait_for_space('Unified global route not available yet')
                         continue
                     req.route=copy.deepcopy(self.global_route)
+                    if req.inspection:
+                        req.goal.pose=copy.deepcopy(req.route.poses[-1].pose)
+                        req.continuous=self.inspection_continuous
             try:
                 rospy.wait_for_service('/planning/start', timeout=5.)
+                rospy.set_param('/drone/planner_generation_last',str(serial))
                 reply=self.planner_client(req)
                 reason='' if reply.success and reply.generation==serial else reply.message or 'Planning ACK generation mismatch'
             except (rospy.ServiceException, rospy.ROSException) as exc:
@@ -336,7 +383,13 @@ class FlightManager:
     def on_global_route(self, message):
         with self.planner_condition:
             if message.path.header.frame_id!='odom' or message.task_id!=self.route_sequence:return
+            if self.inspection_task and not message.inspection:return
+            if message.inspection and message.blocked:
+                self.global_route=None;self.planner_condition.notify_all();return
             self.global_route=message.path
+            if message.inspection and self.inspection_task and self.active_goal is not None and message.path.poses:
+                self.active_goal.pose=copy.deepcopy(message.path.poses[-1].pose)
+                self.inspection_continuous=message.continuous
             self.planner_condition.notify_all()
 
     def route_ready(self, goal):
@@ -344,7 +397,156 @@ class FlightManager:
         if route is None or self.route_sequence!=goal.header.stamp.to_nsec() or len(route.poses)<2:return False
         age=(rospy.Time.now()-route.header.stamp).to_sec()
         a=route.poses[-1].pose.position;b=goal.pose.position
-        return -.02<=age<=2. and math.dist([a.x,a.y,a.z],[b.x,b.y,b.z])<.02
+        return -.02<=age<=2. and (bool(self.inspection_task) or math.dist([a.x,a.y,a.z],[b.x,b.y,b.z])<.02)
+
+    def execute_inspection_route(self, request):
+        with self.lock:
+            route=copy.deepcopy(request.route)
+            owner=getattr(request,'owner','')
+            if owner not in ('','building') or (owner=='building' and (self.inspection_reserved or not self.building_reserved or self.building_status_state not in ('TRANSITING','INSPECTING','RETURNING'))) or (owner!='building' and self.building_reserved):
+                return ExecuteInspectionRouteResponse(False,'另一巡检任务持有执行权限',0)
+            if (not self.map_alignment_ready or self.navigation_map_mode!='PRIOR_NAV' or
+                    not self.authorized or not self.airborne() or not self.fresh_pose() or
+                    self.lio_quality!='HEALTHY' or self.state.mode!='OFFBOARD' or
+                    not self.fresh_map() or not self.fresh_free_map()):
+                return ExecuteInspectionRouteResponse(False,'巡检需要预建地图、授权及健康 OFFBOARD 悬停/导航',0)
+            if (route.header.frame_id!='odom' or not 2<=len(route.poses)<=2048 or
+                    not .1<=request.speed<=self.max_navigation_speed or
+                    not all(self.in_flight_volume([p.pose.position.x,p.pose.position.y,p.pose.position.z]) for p in route.poses)):
+                return ExecuteInspectionRouteResponse(False,'巡检路线或速度非法',0)
+            updating=bool(request.task_id and request.task_id==self.inspection_task and self.phase=='NAVIGATING')
+            if request.task_id and not updating:
+                return ExecuteInspectionRouteResponse(False,'巡检执行会话已中断，必须由操作员点击继续',0)
+            if not updating:
+                if self.phase!='HOLD' or self.goal_queue:
+                    return ExecuteInspectionRouteResponse(False,'请先取消普通目标并进入 HOLD',0)
+                # Mark ownership before the asynchronous ACK worker starts.
+                self.inspection_task=1;self.inspection_continuous=request.continuous;self.inspection_owner=owner
+                previous_speed=self.next_navigation_speed
+                self.next_navigation_speed=request.speed
+                goal=copy.deepcopy(route.poses[-1]);goal.header=copy.deepcopy(route.header)
+                try:reply=self.local_goal(type('InspectionGoal',(),{'goal':goal})(),inspection=True)
+                finally:self.next_navigation_speed=previous_speed
+                if not reply.success:
+                    self.inspection_task=0;self.inspection_continuous=False;self.inspection_owner=''
+                    return ExecuteInspectionRouteResponse(False,reply.message,0)
+                self.inspection_task=self.route_sequence
+                self.inspection_heartbeat=rospy.Time.now()
+            if owner=='building':self.building_flight_owned=True
+            self.inspection_continuous=request.continuous
+            self.inspection_revision+=1
+            self.active_goal.pose=copy.deepcopy(route.poses[-1].pose)
+            self.inspection_route_pub.publish(GlobalRoute(task_id=self.route_sequence,path=route,
+                inspection=True,continuous=request.continuous,revision=self.inspection_revision))
+            return ExecuteInspectionRouteResponse(True,'巡检控制参考已提交',self.route_sequence)
+
+    def on_inspection_status(self,message):
+        if self.inspection_owner=='building':return
+        try:
+            data=json.loads(message.data);ns=int(data['stamp_ns'])
+            stamp=rospy.Time(ns//1000000000,ns%1000000000)
+            age=(rospy.Time.now()-stamp).to_sec()
+            if -.02<=age<=1. and stamp>self.inspection_heartbeat:self.inspection_heartbeat=stamp
+        except (ValueError,KeyError,TypeError):pass
+
+    def on_map_bounds(self,message):
+        with self.lock:
+            self.map_z_offset=message.pose.position.z
+            self.goal_min=list(rospy.get_param('/drone/navigation_min_xyz',self.goal_min))
+            self.goal_max=list(rospy.get_param('/drone/navigation_max_xyz',self.goal_max))
+            self.goal_max[2]=self.max_flight_height-self.map_z_offset-self.ceiling_margin
+            self.ceiling_pub.publish(Float64(data=self.max_flight_height))
+
+    def on_building_status(self,message):
+        try:
+            data=json.loads(message.data);ns=int(data['stamp_ns']);stamp=rospy.Time(ns//1000000000,ns%1000000000)
+            age=(rospy.Time.now()-stamp).to_sec()
+            if -.02<=age<=1. and stamp>self.building_heartbeat:
+                self.building_status_state=data.get('state','');self.building_status_task_id=int(data.get('task_id',0))
+                if self.building_status_state in ('ARMING','TAKEOFF','TRANSITING','INSPECTING','RETURNING','LANDING','PAUSED'):
+                    self.building_heartbeat=stamp
+                if self.inspection_owner=='building' and self.building_status_task_id==self.inspection_task and self.building_status_state in ('TRANSITING','INSPECTING','RETURNING'):
+                    self.inspection_heartbeat=stamp
+        except (ValueError,KeyError,TypeError):pass
+
+    def building_local_goal(self,request):
+        with self.lock:
+            if (not rospy.get_param('/use_sim_time',False) or not rospy.get_param('/drone/sim_aggressive',False) or
+                not self.building_reserved or self.inspection_reserved or not self.authorized or
+                self.building_status_state not in ('TRANSITING','INSPECTING','RETURNING') or
+                not 0<=(rospy.Time.now()-self.building_heartbeat).to_sec()<=1.):
+                return LocalGoalResponse(False,'仿真巡检目标权限/心跳无效')
+            reply=self.local_goal(request,inspection=True)
+            if reply.success:self.building_flight_owned=True
+            return reply
+
+    def building_flight_action(self,req):
+        from drone_stack.srv import BuildingFlightActionResponse
+        with self.lock:
+            if req.action=='hold':
+                if not self.building_flight_owned or self.phase in ('LANDING','DESCENDING','FAILSAFE'):
+                    return BuildingFlightActionResponse(False,'没有本任务可暂停的飞行，降落保护继续')
+                reply=self.hold(None)
+            else:
+                if (not self.building_reserved or self.inspection_reserved or
+                        not 0<=(rospy.Time.now()-self.building_heartbeat).to_sec()<=1. or not self.authorized):
+                    return BuildingFlightActionResponse(False,'整栋巡检授权/管理器心跳失效')
+                if req.action=='arm':reply=self.arm(None)
+                elif req.action=='takeoff':reply=self.takeoff(TakeoffRequest(height_m=req.height_m))
+                elif req.action=='land':reply=self.land(None)
+                else:return BuildingFlightActionResponse(False,'未知整栋飞行动作')
+                if reply.success:self.building_flight_owned=True
+            return BuildingFlightActionResponse(reply.success,reply.message)
+
+    def on_ai_status(self,m):
+        try:
+            data=json.loads(m.data);instance=data['instance_id'];counter=int(data['heartbeat_seq'])
+            if instance==self.ai_instance and counter<=self.ai_counter:return
+            self.ai_instance=instance;self.ai_counter=counter;self.ai_session=data.get('session_id','')
+            self.ai_control=bool(data.get('control_authorized') and data.get('client_alive'))
+            self.ai_task_canceled=data.get('state') in ('CANCELED','FAILED')
+            self.ai_request_id=data.get('request_id','');self.ai_task_active=bool(data.get('busy') and data.get('state') in ('PARSING','EXECUTING'))
+            self.ai_seen_wall=time.monotonic()
+        except (ValueError,KeyError,TypeError):pass
+
+    def ai_valid(self,session):
+        return bool(session and session==self.ai_session and self.ai_control and time.monotonic()-self.ai_seen_wall<=3.)
+
+    def execute_ai_goal(self,req):
+        with self.lock:
+            if not self.ai_valid(req.session_id):return ExecuteAiGoalResponse(False,'AI执行授权或连接失效',0)
+            if req.request_id!=self.ai_request_id or not self.ai_task_active:return ExecuteAiGoalResponse(False,'AI任务代次未就绪或已停止',0)
+            reply=self.local_goal(req)
+            if reply.success:self.ai_navigation_id=self.route_sequence;self.ai_navigation_session=req.session_id;self.ai_navigation_request=req.request_id
+            return ExecuteAiGoalResponse(reply.success,reply.message,self.route_sequence if reply.success else 0)
+
+    def cancel_navigation(self,req):
+        with self.lock:
+            if not req.task_id or req.task_id!=self.route_sequence or self.phase!='NAVIGATING':
+                return CancelNavigationResponse(False,'任务已结束或被替换，没有取消其它任务')
+            reply=self.hold(None)
+            return CancelNavigationResponse(reply.success,reply.message)
+
+    def execute_ai_action(self,req):
+        with self.lock:
+            stopping_owned=(req.action in ('hold','disarm') and self.ai_flight_owned and req.session_id==self.ai_flight_session and req.request_id==self.ai_flight_request)
+            if not stopping_owned:
+                if not self.ai_valid(req.session_id):return ExecuteAiActionResponse(False,'AI执行授权或连接失效')
+                if req.request_id!=self.ai_request_id or not self.ai_task_active:return ExecuteAiActionResponse(False,'AI任务代次未就绪或已停止')
+            if req.action=='hold' and self.phase in ('LANDING','DESCENDING','FAILSAFE'):
+                return ExecuteAiActionResponse(False,'已有降落/失效保护继续执行，AI不能改为HOLD')
+            if req.action=='disarm' and self.phase in ('TAKEOFF','HOLD','NAVIGATING','ROTATING','DESCENDING'):
+                return ExecuteAiActionResponse(False,'AI不能在飞行阶段锁定，请先降落')
+            if req.action=='arm':reply=self.arm(None,ai=True)
+            elif req.action=='takeoff':reply=self.takeoff(TakeoffRequest(height_m=req.height_m),ai=True)
+            elif req.action=='land':reply=self.land(None)
+            elif req.action=='hold':reply=self.hold(None)
+            elif req.action=='disarm':reply=self.disarm(None)
+            else:return ExecuteAiActionResponse(False,'不支持的AI飞行动作')
+            if reply.success and req.action in ('arm','takeoff'):
+                self.ai_flight_owned=req.action;self.ai_flight_session=req.session_id;self.ai_expiry_reported=False
+                self.ai_flight_request=req.request_id
+            return ExecuteAiActionResponse(reply.success,reply.message)
 
     def on_clock(self, msg):
         with self.lock:
@@ -366,6 +568,10 @@ class FlightManager:
                     self.planner_time.to_sec(),self.goal_start.to_sec(),float(self.phase=='NAVIGATING')]))
 
     def set_phase(self, phase):
+        if phase in ('HOLD','LANDING','DESCENDING','FAILSAFE','READY','DISCONNECTED'):
+            self.inspection_task=0;self.inspection_continuous=False;self.inspection_owner=''
+            self.ai_navigation_id=0
+        if phase in ('HOLD','LANDING','DESCENDING','FAILSAFE','DISCONNECTED'):self.ai_flight_owned=''
         if self.phase != phase:
             rospy.loginfo('Flight state: %s -> %s', self.phase, phase)
             self.phase = phase
@@ -421,7 +627,9 @@ class FlightManager:
 
     def on_state(self, msg):
         with self.lock:
+            was_armed=self.state.armed
             self.state = msg
+            if was_armed and not msg.armed:self.ai_flight_owned='';self.ai_expiry_reported=False;self.building_flight_owned=False
             if not msg.connected:
                 self.set_phase('DISCONNECTED')
             elif not msg.armed and self.phase not in (
@@ -812,10 +1020,11 @@ class FlightManager:
             elif not request.data and self.state.armed:
                 self.disarm(None)
             self.authorized = request.data
+            if request.data and self.ai_expiry_reported and not self.state.armed:self.ai_flight_owned=''
             self.auth_pub.publish(Bool(data=self.authorized))
             return SetBoolResponse(success=True, message='Authorized' if self.authorized else 'Authorization revoked')
 
-    def arm(self, _request):
+    def arm(self, _request, ai=False):
         with self.lock:
             if (not self.map_alignment_ready or not self.authorized or not self.fresh_pose() or self.state.armed or
                     self.airborne() or self.phase != 'READY'):
@@ -823,9 +1032,10 @@ class FlightManager:
             self.hold_pose = self.copy_pose()
             self.prime_start = rospy.Time.now()
             self.set_phase('PRIMING_ARM')
+            if not ai:self.ai_flight_owned=''
             return TriggerResponse(success=True, message='Priming OFFBOARD setpoints, then arming')
 
-    def takeoff(self, request):
+    def takeoff(self, request, ai=False):
         with self.lock:
             if self.lio_quality != 'HEALTHY':
                 return TakeoffResponse(success=False, message='Takeoff requires healthy LIO geometry')
@@ -842,6 +1052,7 @@ class FlightManager:
             self.takeoff_start_z = self.hold_pose.position.z
             self.takeoff_start = rospy.Time.now()
             self.set_phase('TAKEOFF')
+            if not ai:self.ai_flight_owned=''
             return TakeoffResponse(success=True, message='Takeoff setpoint streaming')
 
     def disarm(self, _request):
@@ -889,9 +1100,23 @@ class FlightManager:
             q = self.hold_pose.orientation
             self.rotate_yaw_start = tf.transformations.euler_from_quaternion([q.x, q.y, q.z, q.w])[2]
             self.rotate_start = rospy.Time.now()
+            self.rotate_total_angle=2*math.pi;self.rotate_direction=1.
             self.suspend_planner()
             self.set_phase('ROTATING')
             return TriggerResponse(success=True, message='Holding position and rotating 360 degrees at 10 deg/s')
+
+    def rotate_heading(self,request):
+        from drone_stack.srv import RotateHeadingResponse
+        with self.lock:
+            delta=request.yaw_delta_deg
+            if not math.isfinite(delta) or not .1<=abs(delta)<=180:
+                return RotateHeadingResponse(False,'转向角需为±0.1～180度')
+            if self.inspection_reserved or self.building_reserved:
+                return RotateHeadingResponse(False,'请先取消巡检再手动转向')
+            reply=self.rotate_once(None)
+            if not reply.success:return RotateHeadingResponse(False,reply.message)
+            self.rotate_total_angle=math.radians(abs(delta));self.rotate_direction=1. if delta>0 else -1.
+            return RotateHeadingResponse(True,'原地悬停转向 %.1f 度'%delta)
 
     def goal_error(self, goal):
         p = goal.pose.position
@@ -912,8 +1137,10 @@ class FlightManager:
             return 'Goal is inside an inflated obstacle voxel'
         return ''
 
-    def local_goal(self, request, preserve_queue=False):
+    def local_goal(self, request, preserve_queue=False, inspection=False):
         with self.lock:
+            if (self.inspection_reserved or self.building_reserved) and not inspection:
+                return LocalGoalResponse(False,'请先取消巡检任务再发送普通目标')
             goal=copy.deepcopy(request.goal)
             reason=self.goal_error(goal)
             if reason:return LocalGoalResponse(False,reason)
@@ -922,7 +1149,8 @@ class FlightManager:
             self.active_navigation_speed=self.next_navigation_speed
             self.trajectory=None;self.pending_spline=None;self.future_command_since=None
             self.navigation_generation+=1
-            goal.header.stamp=rospy.Time.now()
+            ns=max(rospy.Time.now().to_nsec(),self.route_sequence+1)
+            goal.header.stamp=rospy.Time(ns//1000000000,ns%1000000000)
             self.route_sequence=goal.header.stamp.to_nsec()
             self.global_route=None
             self.required_trajectory_id=self.latest_command_id+1
@@ -955,6 +1183,8 @@ class FlightManager:
 
     def queue_goal(self, request):
         with self.lock:
+            if self.inspection_task or self.inspection_reserved or self.building_reserved:
+                return QueueGoalResponse(False,'巡检正在执行，请先暂停或取消巡检',0)
             goal=copy.deepcopy(request.goal);p=goal.pose.position
             if (not self.map_alignment_ready or not self.authorized or not self.airborne() or not self.fresh_pose() or
                     self.lio_quality!='HEALTHY' or self.state.mode!='OFFBOARD' or
@@ -1008,9 +1238,10 @@ class FlightManager:
             if not ground and (self.phase!='HOLD' or not self.fresh_pose() or self.goal_queue or
                                self.lio_quality!='HEALTHY' or self.state.mode!='OFFBOARD'):
                 return SetMaxFlightHeightResponse(False,self.max_flight_height,'Change ceiling on ground or in healthy HOLD')
-            if not ground and self.current_pose().position.z>height-self.ceiling_margin:
+            if not ground and self.current_pose().position.z+self.map_z_offset>height-self.ceiling_margin:
                 return SetMaxFlightHeightResponse(False,self.max_flight_height,'Ceiling must leave 0.20 m above current altitude')
-            self.max_flight_height=height;self.goal_max[2]=height-self.ceiling_margin
+            self.max_flight_height=height;self.goal_max[2]=height-self.map_z_offset-self.ceiling_margin
+            rospy.set_param('/drone/odom_max_flight_height_m',height-self.map_z_offset)
             rospy.set_param('/drone/max_flight_height_m',height)
             self.ceiling_pub.publish(Float64(data=height))
             return SetMaxFlightHeightResponse(True,height,'最高高度已设置：%.2f m（ENU Z），目标与规划保留0.20 m裕量'%height)
@@ -1023,9 +1254,9 @@ class FlightManager:
 
     def set_navigation_speed(self, request):
         with self.lock:
-            if not math.isfinite(request.speed_mps) or not 0.1 <= request.speed_mps <= 1.0:
+            if not math.isfinite(request.speed_mps) or not 0.1 <= request.speed_mps <= self.max_navigation_speed:
                 return SetNavigationSpeedResponse(False, self.next_navigation_speed,
-                                                  'Speed must be between 0.1 and 1.0 m/s')
+                                                  'Speed must be between 0.1 and %.1f m/s'%self.max_navigation_speed)
             self.next_navigation_speed = request.speed_mps
             return SetNavigationSpeedResponse(True, self.next_navigation_speed,
                                               'Next navigation task speed: %.2f m/s' % self.next_navigation_speed)
@@ -1210,8 +1441,15 @@ class FlightManager:
 
     def tick_goal_arrival(self, now):
         """Strict arrival dwell with a separate, bounded convergence exit gate."""
-        if self.active_goal is None:
+        if self.active_goal is None or self.inspection_continuous:
             return False
+        if self.inspection_task and self.global_route is None:return False
+        if self.inspection_task and self.global_route is not None:
+            # Adjacent coverage lanes can pass close to the final endpoint.
+            # Only the remaining directed arc, not Euclidean proximity, ends a mission.
+            pts=[p.pose.position for p in self.global_route.poses]
+            if sum(math.dist([a.x,a.y,a.z],[b.x,b.y,b.z]) for a,b in zip(pts,pts[1:]))>.20:
+                return False
         p = self.current_pose().position
         g = self.active_goal.pose.position
         v = self.odom.twist.twist.linear
@@ -1307,6 +1545,7 @@ class FlightManager:
         return True
 
     def update_terminal_approach(self):
+        if self.inspection_continuous:return
         if self.terminal_stage != 'CRUISE' or self.active_goal is None or self.global_route is None:
             return
         p = self.current_pose().position
@@ -1323,6 +1562,7 @@ class FlightManager:
             self.set_terminal_stage('APPROACH')
 
     def tick_terminal_endpoint(self, now):
+        if self.inspection_continuous:return False
         """Settle at the SAME approved zero-speed curve endpoint, bounded in time.
 
         No new path or direct unchecked goal command is manufactured. Each
@@ -1445,7 +1685,8 @@ class FlightManager:
             self.flight_valid_pub.publish(Bool(data=display_valid))
             self.flight_snapshot_pub.publish(String(data=json.dumps(dict(
                 stamp_ns=now.to_nsec(), quality=quality, valid=display_valid,
-                reason=self.pose_health_detail))))
+                reason=self.pose_health_detail,
+                publish_monotonic_s=time.monotonic()))))
             if self.airborne() and self.phase not in ('LANDING', 'DESCENDING', 'FAILSAFE'):
                 if quality == 'SEVERE':
                     self.health_landing_latched = True
@@ -1456,12 +1697,25 @@ class FlightManager:
                     reply = self.hold(None, health_override=True)
                     if reply.success:
                         self.error('Health degraded for %.1f s; task cancelled, holding: '%self.health_hold_s+self.pose_health_detail)
+            task_canceled=(self.ai_task_canceled or self.ai_request_id!=self.ai_flight_request) and self.phase in ('PRIMING_ARM','WAIT_OFFBOARD','WAIT_ARM','TAKEOFF')
+            if self.state.connected and self.ai_flight_owned and (self.ai_expiry_reported or task_canceled or not self.ai_valid(self.ai_flight_session)):
+                if not self.ai_expiry_reported:
+                    self.ai_expiry_reported=True;self.error('AI执行授权或连接失效，停止AI起飞/解锁流程')
+                if not self.state.armed:
+                    self.authorized=False;self.auth_pub.publish(Bool(False));self.set_phase('READY')
+                elif self.extended.landed_state==ExtendedState.LANDED_STATE_ON_GROUND and self.phase in ('PRIMING_ARM','WAIT_OFFBOARD','WAIT_ARM','ARMED','READY'):
+                    if time.monotonic()-getattr(self,'ai_cancel_attempt',0.)>=.5:
+                        self.ai_cancel_attempt=time.monotonic();self.disarm(None)
+                    self.setpoint_pub.publish(self.arming_setpoint(self.hold_pose))
+                elif self.fresh_pose():self.hold(None)
+                else:self.start_landing('AI执行连接失效且位置不可用')
+                return
             if not self.state.connected:
                 return
             if not self.state.armed and self.phase in ('DISCONNECTED', 'LOCALIZING', 'READY'):
                 self.set_phase('READY' if self.fresh_pose() else 'LOCALIZING')
             if (self.airborne() and self.phase not in ('LANDING','DESCENDING','FAILSAFE') and
-                    self.odom is not None and self.current_pose().position.z > self.max_flight_height+.05):
+                    self.odom is not None and self.current_pose().position.z+self.map_z_offset > self.max_flight_height+.05):
                 self.start_landing('Virtual ceiling exceeded; landing')
             if self.phase == 'PRIMING_ARM':
                 if not self.authorized or not self.fresh_pose():
@@ -1505,6 +1759,14 @@ class FlightManager:
                     self.error('PX4 did not enter OFFBOARD within 4 seconds')
                     self.set_phase('READY')
                 return
+            if self.building_flight_owned and (not self.building_reserved or (now-self.building_heartbeat).to_sec()>1.):
+                self.building_flight_owned=False
+                if self.phase not in ('LANDING','DESCENDING','FAILSAFE'):
+                    if self.airborne():self.hold(None,health_override=True)
+                    elif self.state.armed and self.extended.landed_state==ExtendedState.LANDED_STATE_ON_GROUND:self.disarm(None)
+                    else:self.set_phase('READY')
+                    self.error('整栋巡检管理器失联/任务撤销，停止后续动作')
+                return
             if self.phase == 'WAIT_ARM':
                 self.setpoint_pub.publish(self.arming_setpoint(self.hold_pose))
                 if self.state.armed:
@@ -1536,6 +1798,12 @@ class FlightManager:
                     self.set_phase('HOLD')
                 return
             if self.phase == 'NAVIGATING':
+                if self.ai_navigation_id==self.route_sequence and (self.ai_task_canceled or self.ai_request_id!=self.ai_navigation_request or not self.ai_valid(self.ai_navigation_session)):
+                    self.stop_navigation('AI control authorization/connection lost; navigation cancelled')
+                    return
+                if self.inspection_task and (now-self.inspection_heartbeat).to_sec()>1.:
+                    self.stop_navigation('Inspection manager heartbeat became stale; navigation cancelled')
+                    return
                 if self.state.mode != 'OFFBOARD':
                     self.start_landing('PX4 left OFFBOARD during navigation')
                     return
@@ -1668,11 +1936,11 @@ class FlightManager:
                     self.start_landing('PX4 left OFFBOARD during rotation')
                     return
                 elapsed = max(0.0, (now-self.rotate_start).to_sec())
-                angle = min(2*math.pi, elapsed*self.rotate_rate)
-                q = tf.transformations.quaternion_from_euler(0, 0, self.rotate_yaw_start+angle)
+                angle = min(self.rotate_total_angle, elapsed*self.rotate_rate)
+                q = tf.transformations.quaternion_from_euler(0, 0, self.rotate_yaw_start+self.rotate_direction*angle)
                 self.hold_pose.orientation.x, self.hold_pose.orientation.y, self.hold_pose.orientation.z, self.hold_pose.orientation.w = q
                 self.setpoint_pub.publish(self.setpoint(self.hold_pose))
-                if angle >= 2*math.pi:
+                if angle >= self.rotate_total_angle:
                     self.set_phase('HOLD')
                 return
             if self.phase == 'HOLD':

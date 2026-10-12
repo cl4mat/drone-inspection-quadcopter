@@ -23,19 +23,18 @@ from voxel_map_client import VoxelMapClient
 from flight_manager import FlightManager
 
 class ReferenceSafetyCells:
-    """Conservative grid padding for EGO's existing 5 cm curve margin.
-
-    At 10 cm voxel resolution, one neighbour cell guarantees that margin.
-    Query lazily; never expand/convert the whole map again each scan.
-    """
+    """Raw inflated voxels; segment checks apply the metric reference margin."""
     def __init__(self,occupied):
         self.occupied=occupied;self.cache={}
     def __contains__(self,cell):
+        return tuple(cell) in self.occupied
+    def neighbours(self,cell):
         cell=tuple(cell)
         if cell not in self.cache:
             x,y,z=cell
-            self.cache[cell]=any((x+dx,y+dy,z+dz) in self.occupied
-                                 for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1))
+            self.cache[cell]=tuple((x+dx,y+dy,z+dz)
+                for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1)
+                if (x+dx,y+dy,z+dz) in self.occupied)
         return self.cache[cell]
 
 class SafeGlobalPath:
@@ -52,17 +51,21 @@ class SafeGlobalPath:
                      rospy.get_param('/ego_planner_node/grid_map/ground_height',.5)]
         self.res=rospy.get_param('/ego_planner_node/grid_map/resolution',.1)
         self.shape=[math.ceil(rospy.get_param('/ego_planner_node/grid_map/map_size_'+a,s)/self.res) for a,s in zip('xyz',[30.,30.,8.])]
-        self.lower=[-8.,-8.,.5]; self.upper=[8.,8.,float(rospy.get_param('/drone/max_flight_height_m',2.5))-.20]; self.step=.25
+        self.lower=list(rospy.get_param('/drone/navigation_min_xyz',[-12.,-10.,.5])); self.upper=list(rospy.get_param('/drone/navigation_max_xyz',[12.,10.,6.6])); self.upper[2]=float(rospy.get_param('/drone/max_flight_height_m',6.6))-.20; self.step=float(rospy.get_param('/drone/global_search_resolution_m',.30))
+        if not math.isfinite(self.step) or not .1<=self.step<=.5:raise ValueError('Global A* search resolution must be 0.1..0.5m')
         self.max_search_nodes=int(rospy.get_param("~max_search_nodes",15000))
         if not 1000 <= self.max_search_nodes <= 60000:raise ValueError("Invalid global search node limit")
         self.geometry=SimpleNamespace(map_origin=self.origin,map_resolution=self.res)
+        self.inspection_intent=None;self.inspection_applied_revision=-1
         self.pub=rospy.Publisher('/drone/global_path',Path,queue_size=1,latch=True)
         self.progress_pub=rospy.Publisher('/drone/global_route_progress',String,queue_size=1,latch=True)
         self.route_pub=rospy.Publisher('/drone/global_route',GlobalRoute,queue_size=1,latch=True)
         self.marker_pub=rospy.Publisher('/drone/global_path_markers',MarkerArray,queue_size=1,latch=True)
         self.status=rospy.Publisher('/drone/global_path_status',String,queue_size=1,latch=True)
+        rospy.Subscriber('/drone/map_transform',PoseStamped,self.on_map_bounds,queue_size=1)
         rospy.Subscriber('/drone/max_flight_height',Float64,self.on_ceiling,queue_size=1)
         rospy.Subscriber('/drone/navigation_goal',PoseStamped,self.on_goal,queue_size=1)
+        rospy.Subscriber('/drone/inspection_route',GlobalRoute,self.on_inspection_route,queue_size=1)
         rospy.Subscriber('/drone/flight_state',String,self.on_phase,queue_size=5)
         rospy.Subscriber('/drone/navigation_stage',String,self.on_stage,queue_size=1)
         # The bridge exposes FCU numeric ENU coordinates as odom, exactly like
@@ -71,10 +74,16 @@ class SafeGlobalPath:
         self.voxel_client=VoxelMapClient(self.origin,self.res,self.shape,self.on_voxel_map,self.invalidate_voxel_map)
         threading.Thread(target=self.run,daemon=True).start()
 
-    def on_ceiling(self,message):
-        if not math.isfinite(message.data) or not .8<=message.data<=2.5:return
+    def on_map_bounds(self,message):
         with self.lock:
-            height=message.data-.20
+            lo=list(rospy.get_param('/drone/navigation_min_xyz',self.lower));hi=list(rospy.get_param('/drone/navigation_max_xyz',self.upper))
+            hi[2]=float(rospy.get_param('/drone/max_flight_height_m',6.6))-message.pose.position.z-.2
+            if lo!=self.lower or hi!=self.upper:self.lower=lo;self.upper=hi;self.generation+=1;self.search=None
+
+    def on_ceiling(self,message):
+        if not math.isfinite(message.data) or not .8<=message.data<=float(rospy.get_param('/drone/configured_max_height_m',6.6)):return
+        with self.lock:
+            height=float(rospy.get_param('/drone/odom_max_flight_height_m',message.data))-.20
             if abs(self.upper[2]-height)<1e-8:return
             self.upper[2]=height;self.generation+=1;self.search=None
             self.reference_route=[];self.reference_progress=0.;self.progress_pose=None
@@ -93,7 +102,18 @@ class SafeGlobalPath:
         self.progress_pub.publish(String(data=json.dumps(dict(task_id=self.task_sequence,
             version=self.route_version,arc_m=self.reference_progress,remaining_points=len(points),
             stamp=msg.header.stamp.to_sec()))))
-        self.route_pub.publish(GlobalRoute(task_id=self.task_sequence,path=msg))
+        intent=self.inspection_intent
+        inspect=bool(intent is not None and intent.task_id==self.task_sequence)
+        continuous=bool(inspect and intent.continuous)
+        blocked=bool(inspect and self.goal is not None and
+            (not points or math.dist(points[-1],self.goal)>=.02))
+        if inspect and not points and self.odom is not None and self.goal is not None:
+            p=self.odom.pose.pose.position
+            remaining=sum(math.dist(a,b) for a,b in zip(self.reference_route,self.reference_route[1:]))-self.reference_progress
+            blocked=not (self.reference_route and remaining<=.20 and math.dist((p.x,p.y,p.z),self.goal)<=.15 and
+                         self.segment_safe((p.x,p.y,p.z),self.goal,(self.cells,self.free)))
+        self.route_pub.publish(GlobalRoute(task_id=self.task_sequence,path=msg,
+            inspection=inspect,continuous=continuous,revision=self.route_version,blocked=blocked))
         markers=MarkerArray()
         for ident in (0,1):
             marker=Marker();marker.header=msg.header;marker.ns='reference_route';marker.id=ident
@@ -119,6 +139,10 @@ class SafeGlobalPath:
             arc+=length
         self.marker_pub.publish(markers)
 
+    def on_inspection_route(self,m):
+        if m.path.header.frame_id!='odom' or not m.inspection or not 2<=len(m.path.poses)<=2048:return
+        with self.lock:self.inspection_intent=m
+
     def on_goal(self,m):
         if m.header.frame_id!='odom':return
         p=m.pose.position;v=(p.x,p.y,p.z)
@@ -126,6 +150,7 @@ class SafeGlobalPath:
             self.task_sequence=m.header.stamp.to_nsec()
             self.generation+=1;self.curve=None;self.search=None;self.route_curve_id=None
             self.reference_route=[];self.reference_progress=0.;self.progress_pose=None;self.route_version=0
+            self.inspection_applied_revision=-1
             self.cells=None;self.free=None
             self.map_stamp=rospy.Time(0);self.free_stamp=rospy.Time(0)
             self.goal=v if all(math.isfinite(x) for x in v) else None
@@ -176,7 +201,26 @@ class SafeGlobalPath:
         if not all(math.isfinite(v) and lo-1e-9<=v<=hi+1e-9 for p in (a,b) for v,lo,hi in zip(p,self.lower,self.upper)):return False
         occupied,free=cells
         if occupied is None:return False
-        return not any(c in occupied for c in FlightManager.segment_cells(self.geometry,a,b))
+        checked=set()
+        for cell in FlightManager.segment_cells(self.geometry,a,b):
+            for obstacle in occupied.neighbours(cell):
+                if obstacle in checked:continue
+                checked.add(obstacle)
+                enter,leave=0.,1.
+                for axis in range(3):
+                    # Closed occupied voxel plus 5 cm clearance. This avoids
+                    # rounding the margin up to another whole 10 cm voxel.
+                    low=self.origin[axis]+obstacle[axis]*self.res-.05
+                    high=low+self.res+.10
+                    delta=b[axis]-a[axis]
+                    if abs(delta)<1e-12:
+                        if a[axis]<low or a[axis]>high:break
+                    else:
+                        t0=(low-a[axis])/delta;t1=(high-a[axis])/delta
+                        enter=max(enter,min(t0,t1));leave=min(leave,max(t0,t1))
+                        if enter>leave:break
+                else:return False
+        return True
 
     def route_safe(self,points,cells):
         return bool(points) and all(self.segment_safe(a,b,cells) for a,b in zip(points,points[1:])) and self.segment_safe(points[0],points[0],cells)
@@ -389,13 +433,34 @@ class SafeGlobalPath:
                     not -.02<=now-odom.header.stamp.to_sec()<=.7):
                     self.search=None;self.clear('地图、时钟或位姿失效，参考路径不可用');continue
                 p=odom.pose.pose.position;start=(p.x,p.y,p.z)
+                intent=self.inspection_intent
+                inspection=bool(intent is not None and intent.task_id==self.task_sequence)
+                if inspection:
+                    if intent.revision==self.inspection_applied_revision and wall-self.last_publish_wall<.45:continue
+                    if not -.02<=now-intent.path.header.stamp.to_sec()<=2.:
+                        self.clear('巡检参考已过期，等待巡检管理器');continue
+                    if intent.revision!=self.inspection_applied_revision:
+                        self.reference_route=[(p.pose.position.x,p.pose.position.y,p.pose.position.z) for p in intent.path.poses]
+                        self.reference_progress=0.;self.progress_pose=None
+                        self.inspection_applied_revision=intent.revision
+                        self.goal=self.reference_route[-1];goal=self.goal
+                        self.route_version+=1
+                    self.search=None
                 reference=self.reference_route;progress=self.reference_progress;previous_pose=self.progress_pose
                 complete=self.path_complete
-            if not all(math.isfinite(v) for v in start):continue
+                if not all(math.isfinite(v) for v in start):continue
             limit=progress+max(.35,math.dist(start,previous_pose)+.15) if previous_pose is not None else float('inf')
             tail,new_progress=self.project_forward(start,reference,progress,limit)
             anchored=self.connect_reference(start,tail,cells)
             retained=self.safe_prefix(anchored,cells)
+            if inspection:
+                with self.lock:
+                    if generation!=self.generation:continue
+                    self.reference_progress=new_progress;self.progress_pose=start
+                    self.path=retained;self.path_complete=len(retained)>=2 and math.dist(retained[-1],goal)<.02
+                    self.publish(retained if len(retained)>=2 else [],
+                        '巡检条带控制参考' if self.path_complete else '巡检参考受阻，保留安全前段并等待绕行')
+                continue
             still_complete=len(retained)>=2 and math.dist(retained[-1],goal)<.01
             with self.lock:
                 if generation!=self.generation:continue

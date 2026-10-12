@@ -1,0 +1,4 @@
+float64 yaw_delta_deg
+---
+bool success
+string message

@@ -1,10 +1,12 @@
 <launch>
+  <arg name="aggressive_sim" default="false"/>
+  <arg name="profile" default="building"/>
   <arg name="max_vel" default="0.5"/>
   <arg name="max_acc" default="0.5"/>
   <include file="$(find ego_planner)/launch/advanced_param.xml">
-    <arg name="map_size_x_" value="30.0"/>
-    <arg name="map_size_y_" value="30.0"/>
-    <arg name="map_size_z_" value="8.0"/>
+    <arg name="map_size_x_" value="$(eval 30.0 if arg('profile') == 'legacy' else 64.0)"/>
+    <arg name="map_size_y_" value="$(eval 30.0 if arg('profile') == 'legacy' else 48.0)"/>
+    <arg name="map_size_z_" value="$(eval 8.0 if arg('profile') == 'legacy' else 12.0)"/>
     <arg name="odometry_topic" value="/mavros/local_position/odom"/>
     <arg name="camera_pose_topic" value="/drone/unused/camera_pose"/>
     <arg name="depth_topic" value="/drone/unused/depth"/>
@@ -27,15 +29,15 @@
   <param name="/ego_planner_node/grid_map/frame_id" value="odom"/>
   <param name="/ego_planner_node/fsm/use_global_route" value="true"/>
   <!-- Cover the quadrotor's roughly 0.30 m horizontal radius plus margin. -->
-  <param name="/ego_planner_node/grid_map/obstacles_inflation" value="0.40"/>
+  <param name="/ego_planner_node/grid_map/obstacles_inflation" value="$(eval .20 if arg('aggressive_sim') == 'true' else float(optenv('DRONE_SIM_OBSTACLE_INFLATION_M', '.40')))"/>
   <!-- Close vertical gaps in the downsampled lidar surface and forbid the
        body centre from diving below the local takeoff-height datum. -->
   <param name="/ego_planner_node/grid_map/obstacles_inflation_z" value="0.25"/>
   <!-- Missing returns in the tilted lidar's blind area are not free space. -->
   <param name="/ego_planner_node/grid_map/retain_cloud_obstacles" value="true"/>
   <param name="/ego_planner_node/grid_map/cloud_memory_start_topic" value="/drone/flight_state"/>
-  <param name="/ego_planner_node/grid_map/ground_height" value="0.5"/>
-  <param name="/ego_planner_node/grid_map/virtual_ceil_height" value="2.6"/>
+  <param name="/ego_planner_node/grid_map/ground_height" value="$(eval .5 if arg('profile') == 'legacy' else -4.5)"/>
+  <param name="/ego_planner_node/grid_map/virtual_ceil_height" value="6.6"/>
   <param name="/ego_planner_node/grid_map/require_observed_free" value="true"/>
   <param name="/ego_planner_node/grid_map/cloud_body_pose_topic" value="/drone/cloud_body_pose"/>
   <rosparam param="/ego_planner_node/grid_map/cloud_body_half_extent">[0.235, 0.235, 0.055]</rosparam>

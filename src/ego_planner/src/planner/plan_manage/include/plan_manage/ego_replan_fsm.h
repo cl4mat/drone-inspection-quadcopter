@@ -7,6 +7,8 @@
 #include <nav_msgs/Path.h>
 #include <sensor_msgs/Imu.h>
 #include <ros/ros.h>
+#include <ros/callback_queue.h>
+#include <atomic>
 #include <std_msgs/Empty.h>
 #include <std_msgs/Bool.h>
 #include <vector>
@@ -70,6 +72,7 @@ namespace ego_planner
     bool prepared_start_{false};
     uint64_t session_generation_{0};
     bool use_global_route_{false};
+    bool inspection_route_{false}, continuous_route_{false};
     uint64_t route_sequence_{0};
     ros::Time route_stamp_;
     vector<Eigen::Vector3d> route_points_;
@@ -90,7 +93,10 @@ namespace ego_planner
 
     /* ROS utils */
     ros::NodeHandle node_;
-    ros::Timer exec_timer_, safety_timer_;
+    ros::Timer exec_timer_, safety_timer_, heartbeat_timer_;
+    ros::CallbackQueue heartbeat_queue_;
+    std::unique_ptr<ros::AsyncSpinner> heartbeat_spinner_;
+    std::atomic<int> heartbeat_state_{0};
     ros::ServiceServer speed_service_, start_service_;
     ros::Subscriber waypoint_sub_, odom_sub_, planning_enabled_sub_;
     ros::Subscriber global_route_sub_;
@@ -131,6 +137,8 @@ namespace ego_planner
     }
     ~EGOReplanFSM()
     {
+      heartbeat_timer_.stop();
+      if(heartbeat_spinner_)heartbeat_spinner_->stop();
     }
 
     void init(ros::NodeHandle &nh);
